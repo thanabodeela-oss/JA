@@ -1,13 +1,8 @@
-# Casio V-R100 Tools: CIA001 SQL + EJ Viewer (เพิ่มสรุปยอดขายตามสินค้า)
-# run:  streamlit run Codeapp.py
-# pip:  pip install streamlit pandas openpyxl pillow xlsxwriter
-
 import streamlit as st
 import pandas as pd
 import re, math
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
-from pathlib import Path
 from io import BytesIO
 
 # ==================== Page Config ====================
@@ -25,38 +20,25 @@ st.markdown("""
   [data-testid="stSidebar"]{background:linear-gradient(180deg,#bbdefb 0%,#e3f2fd 100%)}
   .stButton>button{background:linear-gradient(90deg,#42a5f5 0%,#2196f3 100%);color:#fff;border:none;border-radius:8px;
     padding:.5rem 1.5rem;font-weight:500;transition:.3s;box-shadow:0 2px 5px rgba(33,150,243,.3)}
-  .stButton>button:hover{background:linear-gradient(90deg,#2196f3 0%,#1976d2 100%);transform:translateY(-2px)}
+  .stButton>button:hover{transform:translateY(-2px)}
   .stDownloadButton>button{background:linear-gradient(90deg,#26c6da 0%,#00acc1 100%);color:#fff;border:none;border-radius:8px;
     padding:.5rem 1.5rem;font-weight:500;box-shadow:0 2px 5px rgba(0,172,193,.3)}
-  .stDownloadButton>button:hover{background:linear-gradient(90deg,#00acc1 0%,#0097a7 100%);transform:translateY(-2px)}
+  .stDownloadButton>button:hover{transform:translateY(-2px)}
   .stForm{background:#fff;padding:1.5rem;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.05);border:1px solid #e3f2fd}
-  .stTabs [data-baseweb="tab-list"]{gap:8px;background:#fff;padding:.5rem;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.05)}
-  .stTabs [data-baseweb="tab"]{border-radius:8px;color:#42a5f5;font-weight:500}
-  .stTabs [aria-selected="true"]{background:linear-gradient(90deg,#42a5f5 0%,#2196f3 100%);color:#fff}
   h1,h2,h3{color:#1565c0}
   .stDataFrame{border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.05)}
-  [data-testid="stFileUploader"]{background:#fff;padding:1rem;border-radius:10px;border:2px dashed #90caf9}
 </style>
 """, unsafe_allow_html=True)
 
 # ==================== Header ====================
-def show_header():
-    st.markdown("""
-    <div style='text-align:center;margin:.75rem 0 1.5rem 0;'>
-      <div style='font-size:42px;font-weight:700;background:linear-gradient(135deg,#42a5f5 0%,#2196f3 100%);
-           -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>bewild</div>
-      <div style='color:#64b5f6'>Casio V-R100 Tools · แปลง Excel/CSV เป็น SQL (CIA001) · วิเคราะห์ยอดขาย EJ</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-show_header()
+st.markdown("<h2 style='text-align:center'>Casio V-R100 Tools</h2>", unsafe_allow_html=True)
 
 # ==================== Sidebar ====================
 with st.sidebar:
     st.markdown("### ⚙️ การตั้งค่า")
-    st.markdown("---")
-    vr100_enc = st.selectbox("Encoding ไฟล์ SQL", ["UTF-8 (ปกติ)", "UTF-8 with BOM (UTF-8-SIG)"], index=0)
-    st.caption("• ราคาใช้เฉพาะคอลัมน์ 'ราคาขาย' • แถวที่มี '3 ชิ้น 100' หรือ '4 ชิ้น 100' จะตั้งราคาเป็น 0 ก่อน")
+    vr100_enc = st.selectbox("Encoding ไฟล์ SQL", ["UTF-8 (ปกติ)", "UTF-8 with BOM (UTF-8-SIG)"], index=1)
+    st.caption("อัตโนมัติ: จับชีท + หัวตาราง + คอลัมน์เอง • ใช้เฉพาะ 'ราคาขาย' + โปรคงที่")
+    st.caption("โปร: 3ชิ้น100→50฿, 4ชิ้น100→35฿, 50/2ชิ้น100→80฿ (ต่อชิ้น)")
 
 # ==================== Helpers ====================
 def export_bytes(sql_text: str) -> bytes:
@@ -73,22 +55,24 @@ def now_casio_fmt() -> str:
 def sql_str(s) -> str:
     return "" if s is None else str(s).replace("'", "''")
 
-def is_numeric_series(sr: pd.Series, sample=50, min_ratio=0.6) -> bool:
-    vals = sr.dropna().astype(str)
-    if vals.empty:
-        return False
-    vals = vals.head(sample)
-    ok = 0
-    for v in vals:
-        v = v.strip().replace(",", "")
-        try:
-            float(v)
-            ok += 1
-        except Exception:
-            pass
-    return ok / len(vals) >= min_ratio
+def nz_str(v: object) -> str:
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    s = "" if v is None else str(v).strip()
+    return "" if s.lower() == "nan" else s
 
-# บาท → สตางค์ (robust)
+def to_int0(v, default=0) -> int:
+    try:
+        x = pd.to_numeric(v, errors="coerce")
+        if pd.isna(x):
+            return default
+        return int(float(x))
+    except Exception:
+        return default
+
 def to_satang(x) -> int:
     if x is None:
         return 0
@@ -98,47 +82,66 @@ def to_satang(x) -> int:
     except Exception:
         pass
     s = str(x).strip()
-    if s == "" or s.lower() == "nan":
+    if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s):
         return 0
-    s = re.sub(r"[^\d\.\-]", "", s)  # keep digits/dot/minus
-    if s in {"", ".", "-", "-.", ".-"}:
-        return 0
-    try:
-        d = Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        return int(d * 100)
-    except Exception:
-        return 0
+    d = Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return int(d * 100)
 
-# อ่าน Excel เดาหัวตารางอัตโนมัติ
+# ---------- อ่าน Excel อัตโนมัติ (SMART HEADER) ----------
+CAND_HEADERS = {
+    "รหัสสินค้า","ITEM CODE","ITEMCODE","SAPID","MATERIAL","MATERIAL ID",
+    "ชื่อสินค้า","ITEMNAME","NAME ITEM","NAMEITEM","รายการสินค้า","SKU DESCRIPTION",
+    "บาร์โค้ด","BARCODE","UNIT BARCODE","SCANCODE1",
+    "UNITQTY","QTY","PACK","ชิ้นต่อแพ็ค","รวมชิ้นต่อแพ็ค","หน่วยต่อแพ็ค",
+    "ราคาขาย","PRICE","UNIT PRICE","RETAIL PRICE","ราคาต่อหน่วย"
+}
+
+def _canon(s: str) -> str:
+    return re.sub(r"[\s_\-\+\.\(\)\[\]\{\}/\\]+", "", s.strip().upper())
+
+
 def read_excel_smart(file_obj) -> pd.DataFrame:
+    """เลือกชีทที่ใช่ + หาแถวหัวตารางจริงโดยสแกน 10 แถวแรก"""
     data = file_obj.read()
-    buf = BytesIO(data)
-    probe = pd.read_excel(buf, header=None, dtype=str)
-    header_row = 0
-    candidates = {
-        "SKU CODE", "MATERIAL ID", "MATERIAL",
-        "SKU DESCRIPTION", "NAMEITEM", "NAME+ITEM", "ชื่อสินค้า",
-        "UNIT BARCODE", "บาร์โค้ด (ชิ้น)", "บาร์โค้ด", "ราคาขาย"
-    }
-    for i in range(min(10, len(probe))):
-        row = [str(x).strip() if pd.notna(x) else "" for x in probe.iloc[i].tolist()]
-        if candidates & {v.upper() for v in row if v}:
-            header_row = i
-            break
-    buf2 = BytesIO(data)
-    return pd.read_excel(buf2, header=header_row, dtype=str)
+    xls = pd.ExcelFile(BytesIO(data))
+    # เลือกชีท
+    if "ยอดขาย" in xls.sheet_names:
+        target_sheet = "ยอดขาย"
+    else:
+        target_sheet = None
+        for sh in xls.sheet_names:
+            probe = pd.read_excel(BytesIO(data), sheet_name=sh, nrows=1, header=None)
+            if probe.astype(str).apply(lambda s: s.str.contains("ราคา", na=False)).any(axis=None):
+                target_sheet = sh
+                break
+        if not target_sheet:
+            target_sheet = xls.sheet_names[0]
+    # หา header row
+    df_probe = pd.read_excel(BytesIO(data), sheet_name=target_sheet, header=None, dtype=str)
+    best_row, best_score = 0, -1
+    cand_set = {_canon(h) for h in CAND_HEADERS}
+    for i in range(min(10, len(df_probe))):
+        row = [str(x) if pd.notna(x) else "" for x in df_probe.iloc[i].tolist()]
+        score = sum(1 for v in row if _canon(v) in cand_set)
+        if score > best_score:
+            best_score, best_row = score, i
+    # อ่านจริงด้วย header=best_row
+    return pd.read_excel(BytesIO(data), sheet_name=target_sheet, header=best_row, dtype=str)
 
 # ==================== CIA001 SQL ====================
 def make_row_sql_cia001(row: pd.Series, ts: str) -> str:
-    itemcode   = str(row.get("ITEMCODE", "")).strip().zfill(12)
-    scancode1  = str(row.get("SCANCODE1", "")).strip()
-    itemname   = str(row.get("ITEMNAME", "")).strip()
+    raw_code   = nz_str(row.get("ITEMCODE", ""))
+    itemcode   = raw_code.zfill(12) if raw_code else ""
+    scancode1  = nz_str(row.get("SCANCODE1", ""))
+    itemname   = nz_str(row.get("ITEMNAME", ""))
+
     dept       = "bewild"
-    parm       = str(row.get("ITEMPARMCODE", "000001")).strip()
-    unitweight = float(pd.to_numeric(row.get("UNITWEIGHT", 0), errors="coerce") or 0)
-    unitqty    = int(pd.to_numeric(row.get("UNITQTY", 1), errors="coerce") or 1)
-    unitprice  = int(pd.to_numeric(row.get("UNITPRICE", 0), errors="coerce") or 0)
-    taxcode_1  = str(row.get("TAXCODE_1", "01")).strip()
+    parm       = nz_str(row.get("ITEMPARMCODE", "000001"))
+    taxcode_1  = nz_str(row.get("TAXCODE_1", "01"))
+
+    unitweight = to_int0(row.get("UNITWEIGHT", 0), 0)
+    unitqty    = to_int0(row.get("UNITQTY",   1), 1)
+    unitprice  = to_int0(row.get("UNITPRICE", 0), 0)
 
     delete_sql = f"DELETE FROM CIA001 WHERE ITEMCODE='{sql_str(itemcode)}';"
     insert_sql = (
@@ -149,6 +152,7 @@ def make_row_sql_cia001(row: pd.Series, ts: str) -> str:
     )
     return delete_sql + "\n" + insert_sql
 
+
 def build_sql_cia001(df: pd.DataFrame) -> str:
     ts = now_casio_fmt()
     lines = ["BEGIN TRANSACTION;"]
@@ -157,117 +161,105 @@ def build_sql_cia001(df: pd.DataFrame) -> str:
     lines.append("COMMIT;")
     return "\n".join(lines)
 
-# ==================== Normalizer ====================
+# ==================== Normalizer (อัตโนมัติ) ====================
+
 def normalize_uploaded_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    แมปคอลัมน์จากไฟล์ผู้ใช้ -> CIA001:
-      - ราคาใช้เฉพาะคอลัมน์ 'ราคาขาย'
-      - ถ้าเจอข้อความ '3 ชิ้น 100' หรือ '4 ชิ้น 100' ในแถวนั้น (คอลัมน์ใดก็ได้) → UNITPRICE = 0
-      - บาร์โค้ดว่างให้ว่าง ไม่เติมเอง
+    ใช้ 'ราคาขาย' (เฉพาะเลขล้วน) + override โปร:
+      - 3 ชิ้น 100      -> 50 บาท/ชิ้น
+      - 4 ชิ้น 100      -> 35 บาท/ชิ้น
+      - 50 / 2 ชิ้น 100 -> 80 บาท/ชิ้น
+    แล้วค่อยแปลงเป็นสตางค์
     """
     def canon(s: str) -> str:
-        if s is None:
-            return ""
+        if s is None: return ""
         s = str(s).strip().upper()
-        return re.sub(r"[\s_\-\+\.\(\)\[\]\{\}\/\\]+", "", s)
+        return re.sub(r"[\s_\-\+\.\(\)\[\]\{\}/\\]+", "", s)
 
     cols = list(df_raw.columns)
     cmap = {canon(c): c for c in cols}
 
-    def pick_exact(names: list[str]) -> str | None:
+    def pick_exact(names):
         for n in names:
             k = canon(n)
             if k in cmap:
                 return cmap[k]
         return None
 
-    col_itemcode = pick_exact(["SKU CODE", "MATERIAL ID", "MATERIAL", "ITEM CODE", "รหัสสินค้า"])
-    col_itemname = pick_exact(["nameItem", "NAMEITEM", "SKU DESCRIPTION", "NAME+ITEM", "ITEMNAME", "ชื่อสินค้า", "รายการสินค้า"])
-
-    barcode_candidates = [c for c in cols if any(k in canon(c) for k in ["BARCODE", "บาร์โค้ด"])]
-    col_barcode = barcode_candidates[0] if barcode_candidates else None
-
-    qty_candidates = [c for c in cols if any(k in canon(c) for k in ["UNITQTY", "QTY", "PACK", "ชิ้นต่อแพ็ค", "รวมชิ้นต่อแพ็ค", "ในกล่อง", "หน่วย"])]
-    col_unitqty = qty_candidates[0] if qty_candidates else None
-
-    col_price = pick_exact(["ราคาขาย"])
-    col_date = pick_exact(["DATE", "วันที่"])
+    col_itemcode = pick_exact(["รหัสสินค้า","ITEM CODE","ITEMCODE","SAPID","MATERIAL","MATERIAL ID"])
+    col_itemname = pick_exact(["ชื่อสินค้า","ITEMNAME","NAMEITEM","NAME ITEM","SKU DESCRIPTION","รายการสินค้า"])
+    col_barcode  = pick_exact(["บาร์โค้ด","BARCODE","UNIT BARCODE","SCANCODE1"])
+    col_price    = pick_exact(["ราคาขาย","PRICE","UNIT PRICE","RETAIL PRICE","ราคาต่อหน่วย"])
+    col_unitqty  = pick_exact(["UNITQTY","QTY","PACK","ชิ้นต่อแพ็ค","รวมชิ้นต่อแพ็ค","หน่วยต่อแพ็ค"])
 
     out = pd.DataFrame()
-    if col_date:
-        out["DATE"] = df_raw[col_date]
-
     out["ITEMCODE"]  = df_raw[col_itemcode] if col_itemcode else ""
     out["ITEMNAME"]  = df_raw[col_itemname] if col_itemname else ""
     out["SCANCODE1"] = df_raw[col_barcode]  if col_barcode  else ""
-    out["UNITQTY"]   = df_raw[col_unitqty]  if col_unitqty  else 1
+    out["UNITQTY"]   = pd.to_numeric(df_raw[col_unitqty], errors="coerce").fillna(1).astype(int) if col_unitqty else 1
 
-    price_series = df_raw[col_price] if col_price else pd.Series([0] * len(df_raw))
+    # 1) ใช้ 'ราคาขาย' เฉพาะที่เป็นเลขล้วน
+    if col_price:
+        rp = df_raw[col_price].astype(str).str.strip()
+        is_num = rp.str.fullmatch(r"[+-]?\d+(?:[.,]\d+)?")
+        base_baht = pd.to_numeric(
+            rp.str.replace(",", "", regex=False).str.replace("฿","", regex=False),
+            errors="coerce"
+        ).where(is_num)
+    else:
+        base_baht = pd.Series([None]*len(df_raw), index=df_raw.index, dtype="float")
+    out["UNITPRICE"] = base_baht
 
-    promo_mask = pd.Series(False, index=df_raw.index)
-    patterns = [r"3\s*ชิ้น\s*100", r"4\s*ชิ้น\s*100"]
-    for c in cols:
-        s = df_raw[c].astype(str).fillna("")
-        for pat in patterns:
-            promo_mask |= s.str.contains(pat, flags=re.IGNORECASE, regex=True)
+    # 2) Override โปรข้อความ (ค่าคงที่)
+    trans = str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789")
+    row_texts = df_raw.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(trans).lower(), axis=1)
+    promo_rules = [
+        (re.compile(r"3\s*ชิ้น\s*100"), 50.0),
+        (re.compile(r"4\s*ชิ้น\s*100"), 35.0),
+        (re.compile(r"50\s*/\s*2\s*ชิ้น\s*100"), 80.0),
+    ]
+    override = pd.Series([None]*len(df_raw), index=df_raw.index, dtype="object")
+    for pat, baht in promo_rules:
+        override.loc[row_texts.str.contains(pat, regex=True, na=False)] = baht
+    out.loc[override.notna(), "UNITPRICE"] = override[override.notna()].astype(float)
 
-    out["UNITPRICE"] = price_series
-    out.loc[promo_mask, "UNITPRICE"] = 0
-
+    # 3) ค่าคงที่เครื่อง
     out["ITEMPARMCODE"] = "000001"
     out["UNITWEIGHT"]   = 0
     out["TAXCODE_1"]    = "01"
 
-    for c in ["ITEMCODE", "SCANCODE1", "ITEMNAME", "ITEMPARMCODE", "TAXCODE_1"]:
-        out[c] = out[c].astype(str).str.strip()
-
-    out["UNITQTY"]   = pd.to_numeric(out.get("UNITQTY", 1), errors="coerce").fillna(1).astype(int)
+    # 4) ทำความสะอาด + แปลง บาท→สตางค์
+    for c in ["ITEMCODE","ITEMNAME","SCANCODE1","ITEMPARMCODE","TAXCODE_1"]:
+        out[c] = out[c].astype("string").fillna("").astype(str).str.strip()
     out["UNITPRICE"] = out["UNITPRICE"].fillna(0).apply(to_satang)
 
+    # 5) ตัดแถวว่าง
     out = out[~((out["ITEMCODE"] == "") & (out["ITEMNAME"] == ""))].reset_index(drop=True)
-
-    if "DATE" in out.columns:
-        def fmt_date(s):
-            s = str(s).strip()
-            if re.fullmatch(r"\d{8}", s):
-                return f"{s[0:4]}/{s[4:6]}/{s[6:8]}"
-            m = re.match(r"(\d{1,2})\.(\d{1,2})\.(\d{4})$")
-            if m:
-                d, mth, y = m.groups()
-                return f"{y}/{int(mth):02d}/{int(d):02d}"
-            return s
-        out["DATE"] = out["DATE"].apply(fmt_date)
-
     return out
 
-# ==================== EJ Parsing (เพิ่มสรุปรายการสินค้า) ====================
+# ==================== EJ Parsing ====================
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
-NON_ITEM_KEYWORDS = (
-    "รวม", "ยอดสุทธิ", "เงินสด", "ทอน", "บัตร", "รับชำระ", "ชำระ",
-    "ส่วนลด", "คูปอง", "VAT", "ภาษี", "หัวบิล", "ท้ายบิล"
-)
-PAT_DATE_TIME_LINE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?:\s+\d+)?$")
-PAT_QTYxPRICE = re.compile(r"^(?P<name>.+?)\s+(?P<qty>\d+)\s*[x×]\s*(?P<unit>[\d\.,]+)\s*=\s*(?P<amt>[\d\.,]+)$")
-PAT_DATE_TIME_ANY = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}")
-PAT_NAME_HAS_LETTER = re.compile(r"[A-Za-zก-๙]")
-PAT_TAIL_AMOUNT = re.compile(r"^(?P<name>.+?)\s+(?P<amt>[\d\.,]+)$")
-PAT_RECEIPT_NO = re.compile(r"(ใบเสร็จ|เลขที่บิล|RECEIPT|HINVOICENUMBER).*?(\d+)", re.IGNORECASE)
+NON_ITEM_KEYWORDS = ("รวม","ยอดสุทธิ","เงินสด","ทอน","บัตร","รับชำระ","ชำระ","ส่วนลด","คูปอง","VAT","ภาษี","หัวบิล","ท้ายบิล","ยกเลิก","VOID")
+PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,]+)\s*$")
+
 
 def read_text_try(b: bytes) -> str:
     for enc in EJ_ENCODINGS:
         try:
             return b.decode(enc)
-        except:
+        except Exception:
             continue
     return b.decode("utf-8", errors="ignore")
+
 
 def num_from_text(s: str) -> float:
     s = s.replace(",", "").replace("฿", "").strip()
     s = s.translate(str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789"))
     try:
         return float(s)
-    except:
+    except Exception:
         return 0.0
+
 
 def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสินค้า") -> bytes:
     bio = BytesIO()
@@ -277,87 +269,63 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสิ�
     return bio.getvalue()
 
 
-def looks_like_discount(name: str) -> bool:
-    n = name.upper()
-    return n.startswith("DISC") or "ส่วนลด" in name
+def parse_ej_text(txt: str):
+    """คืนค่า (receipts, items) โดย items = list of dict(name, qty, amount)."""
+    receipts = []
+    items = []
 
-def parse_blocks_from_lines(lines: list[str]):
-    blocks, curr = [], []
-    for ln in lines:
-        if ln.strip() == "S":
-            curr = [ln]
-        elif ln.strip() == "E":
-            curr.append(ln); blocks.append(curr); curr = []
-        elif curr:
-            curr.append(ln)
-    return blocks
-
-def parse_receipts_and_items_from_ej_bytes(b: bytes):
-    """คืนค่า (df_receipts, df_item_rows)"""
-    txt = read_text_try(b)
-    lines = [ln.rstrip("\r\n") for ln in txt.splitlines()]
-    blocks = parse_blocks_from_lines(lines)
-
-    receipts, item_rows = [], []
+    # บล็อกระหว่าง S ... E
+    blocks = re.split(r"\n(?=S\n)", "\n" + txt)
     for blk in blocks:
-        hdr, body = {}, []
-        for ln in blk:
-            if ln.startswith("H") and "=" in ln:
-                k, v = ln.split("=", 1); hdr[k.strip()] = v.strip()
-            if ln.startswith("B"):
-                body.append(ln[1:].rstrip())
+        if not blk.strip().startswith("S\n"):
+            continue
+        # header fields
+        mode = None
+        price_total = None
+        lines = []
+        in_receipt = False
+        canceled = False
+        for raw in blk.splitlines():
+            if raw.startswith("HMODE="):
+                mode = raw.split("=",1)[1].strip()
+            elif raw.startswith("HPRICE="):
+                price_total = raw.split("=",1)[1].strip()
+            elif raw.startswith("Ureceipt"):
+                in_receipt = True
+            elif raw.startswith("B"):
+                s = raw[1:].rstrip()
+                if in_receipt:
+                    t = s.strip()
+                    if "ยกเลิก" in t or "VOID" in t:
+                        canceled = True
+                    lines.append(t)
+        if mode != "REG":
+            continue
+        if canceled:
+            continue
 
-        # เฉพาะบิลขายปกติ
-        if hdr.get("HMODE","") == "REG" and hdr.get("HINVOICENUMBER","") != "000000":
-            # รายการบิลรวม
-            amt = hdr.get("HPRICE","0").replace(",","")
-            try: amt = float(amt)
-            except: amt = 0.0
-            receipts.append({
-                "DATE": hdr.get("HBIZDATE",""),
-                "TIME": hdr.get("HINVOICETIME",""),
-                "INVOICE": hdr.get("HINVOICENUMBER",""),
-                "AMOUNT": amt
-            })
+        # ดึงรายการสินค้า
+        for t in lines:
+            # ตัดบรรทัดที่เป็นสรุป/ส่วนลด
+            if any(k in t for k in NON_ITEM_KEYWORDS):
+                continue
+            m = PAT_LINE_ITEM.match(t)
+            if not m:
+                continue
+            name = m.group("name").strip()
+            qty = int(m.group("qty"))
+            amt = num_from_text(m.group("amt"))
+            items.append({"name": name, "qty": qty, "amount": amt})
 
-            # รายการสินค้าในบิล (จากบรรทัด B...)
-            curr_receipt = hdr.get("HINVOICENUMBER","")
-            for raw in body:
-                line = " ".join(raw.strip().split())
-                if not line:
-                    continue
-                # ข้ามบรรทัดวันที่/เวลา/บิล เช่น 14/10/2025 9:31 หรือมีเลขบิลต่อท้าย
-                if PAT_DATE_TIME_LINE.match(line) or PAT_DATE_TIME_ANY.search(line):
-                    continue
-                if any(k in line for k in NON_ITEM_KEYWORDS):
-                    continue
-                m1 = PAT_QTYxPRICE.match(line)
-                if m1:
-                    name = m1.group("name").strip()
-                    name = re.sub(r'^\d+\s*', '', name)  # ลบเลขขึ้นต้นชื่อ (เฉพาะจุดนี้)
-                    if looks_like_discount(name):  # ตัดส่วนลด/บรรทัดไม่ใช่สินค้า
-                        continue
-                    qty = int(m1.group("qty"))
-                    amt = num_from_text(m1.group("amt"))
-                    item_rows.append({"receipt": curr_receipt, "name": name, "qty": qty, "amount": amt})
-                    continue
-                m2 = PAT_TAIL_AMOUNT.match(line)
-                if m2:
-                    name = m2.group("name").strip()
-                    name = re.sub(r'^\d+\s*', '', name)  # ลบเลขขึ้นต้นชื่อ (เฉพาะจุดนี้)
-                    if not PAT_NAME_HAS_LETTER.search(name):
-                        continue
-                    if looks_like_discount(name) or any(k in name for k in NON_ITEM_KEYWORDS):
-                        continue
-                    amt = num_from_text(m2.group("amt"))
-                    if amt == 0:
-                        continue
-                    item_rows.append({"receipt": curr_receipt, "name": name, "qty": 1, "amount": amt})
-                    continue
+        # เก็บใบเสร็จแบบหยาบ
+        if price_total and price_total.strip():
+            try:
+                receipts.append({"amount": num_from_text(price_total)})
+            except Exception:
+                pass
 
-    df_r = pd.DataFrame(receipts) if receipts else pd.DataFrame(columns=["DATE","TIME","INVOICE","AMOUNT"])
-    df_i = pd.DataFrame(item_rows) if item_rows else pd.DataFrame(columns=["receipt","name","qty","amount"])
-    return df_r, df_i
+    return pd.DataFrame(receipts), pd.DataFrame(items)
+
 
 def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
     if df_items.empty:
@@ -377,10 +345,9 @@ tab_prod, tab_sales = st.tabs(["🏷️ สินค้า (CIA001)", "📊 ย�
 # ===== TAB 1: CIA001 =====
 with tab_prod:
     st.markdown("### อัปโหลด Excel/CSV หลายรายการ")
-    st.caption("ต้องมีคอลัมน์: **SKU CODE (หรือ MATERIAL ID), ชื่อสินค้า (เช่น nameItem/SKU DESCRIPTION), บาร์โค้ด (ถ้ามี), จำนวนต่อหน่วย (ถ้ามี), และ 'ราคาขาย'** • แถวที่มีข้อความ **3 ชิ้น 100/4 ชิ้น 100** จะตั้งราคาเป็น 0 ชั่วคราว")
+    st.caption("อัตโนมัติ: จับชีท + หัวตาราง + คอลัมน์เอง • ใช้เฉพาะ 'ราคาขาย' + โปรคงที่")
 
-    uploaded = st.file_uploader("เลือกไฟล์ Excel หรือ CSV", type=["xlsx", "csv"], key="up_prod",
-                                help="รองรับ .xlsx และ .csv • หากไฟล์มีบรรทัด 'Update:' อยู่เหนือหัวตาราง ระบบจะจับหัวให้เอง")
+    uploaded = st.file_uploader("เลือกไฟล์ Excel หรือ CSV", type=["xlsx", "csv"], key="up_prod")
     if uploaded is not None:
         with st.spinner("🔄 กำลังประมวลผลไฟล์..."):
             if uploaded.name.lower().endswith(".csv"):
@@ -389,35 +356,34 @@ with tab_prod:
                 df_raw = read_excel_smart(uploaded)
             df = normalize_uploaded_df(df_raw)
 
-        st.success(f"✅ นำเข้าสำเร็จ **{len(df)}** รายการ")
-        with st.expander("👀 ดูข้อมูลที่นำเข้า (20 รายการแรก)", expanded=True):
-            st.dataframe(df.head(20), use_container_width=True, hide_index=True)
+        st.success(f"✅ นำเข้าสำเร็จ {len(df):,} รายการ")
+        with st.expander("👀 ดูข้อมูลที่นำเข้า (30 รายการแรก)", expanded=True):
+            st.dataframe(df.head(30), use_container_width=True, hide_index=True)
 
         sql_text = build_sql_cia001(df)
-        with st.expander("📄 ดู SQL Code (50 บรรทัดแรก)"):
-            st.code("\n".join(sql_text.split("\n")[:50]) + "\n\n... (ดูเพิ่มเติมในไฟล์ที่ดาวน์โหลด)", language="sql")
+        with st.expander("📄 ดู SQL (ตัวอย่าง 50 บรรทัดแรก)"):
+            st.code("\n".join(sql_text.splitlines()[:50]) + "\n...", language="sql")
 
         c1, c2 = st.columns(2)
         with c1:
-            st.download_button(f"⬇️ ดาวน์โหลด SQL ({len(df)} รายการ)", export_bytes(sql_text),
+            st.download_button("⬇️ ดาวน์โหลด SQL (เลือก Encoding ด้านซ้าย)", export_bytes(sql_text),
                                file_name="CIA001_bulk_import.sql", mime="text/plain", use_container_width=True)
         with c2:
-            st.download_button("📊 Export ข้อมูลเป็น CSV", export_csv_bytes(df),
+            st.download_button("📊 Export CSV (สำรองข้อมูล)", export_csv_bytes(df),
                                file_name="CIA001_data_backup.csv", mime="text/csv", use_container_width=True)
 
     st.markdown("---")
     st.markdown("### เพิ่มสินค้าทีละรายการ")
-    if "one_sql" not in st.session_state:
-        st.session_state.one_sql = ""
-    with st.form("one_item", clear_on_submit=False):
+    if "one_sql" not in st.session_state: st.session_state.one_sql = ""
+    with st.form("one_item"):
         c1, c2 = st.columns(2)
         with c1:
-            itemcode = st.text_input("🔢 รหัสสินค้า (SKU)", placeholder="12345")
-            itemname = st.text_input("📝 ชื่อสินค้า", placeholder="เช่น กาแฟเย็น")
+            itemcode = st.text_input("🔢 รหัสสินค้า (SKU)", "")
+            itemname = st.text_input("📝 ชื่อสินค้า", "")
         with c2:
-            scancode1 = st.text_input("📱 บาร์โค้ด (ชิ้น)", placeholder="8850123456789")
+            scancode1 = st.text_input("📱 บาร์โค้ด (ชิ้น)", "")
             unitqty   = st.number_input("📦 จำนวนต่อหน่วย", min_value=1, step=1, value=1)
-        price_baht = st.text_input("💰 ราคาต่อชิ้น (บาท)", value="", placeholder="179.00")
+        price_baht = st.text_input("💰 ราคาต่อชิ้น (บาท)", "", placeholder="179.00")
         unitprice  = to_satang(price_baht)
         submitted_one = st.form_submit_button("✨ สร้าง SQL", use_container_width=True)
 
@@ -430,62 +396,56 @@ with tab_prod:
         st.session_state.one_sql = "BEGIN TRANSACTION;\n" + make_row_sql_cia001(pd.Series(row), now_casio_fmt()) + "\nCOMMIT;"
         st.success("✅ สร้าง SQL สำเร็จ!")
     if st.session_state.one_sql:
-        with st.expander("📄 ดู SQL Code", expanded=True):
+        with st.expander("📄 ดู SQL ที่สร้าง", expanded=True):
             st.code(st.session_state.one_sql, language="sql")
-        st.download_button("⬇️ ดาวน์โหลด SQL", export_bytes(st.session_state.one_sql),
+        st.download_button("⬇️ ดาวน์โหลด SQL (รายการเดียว)", export_bytes(st.session_state.one_sql),
                            file_name="CIA001_single_item.sql", mime="text/plain", use_container_width=True)
 
 # ===== TAB 2: EJ =====
 with tab_sales:
     st.markdown("### วิเคราะห์ยอดขายจากไฟล์ EJ")
-    st.caption("อัปโหลด `log_YYYYMMDD.txt` จากเครื่อง V-R100 (อัปได้หลายไฟล์)")
+    st.caption("อัปโหลด log_YYYYMMDD.txt จากเครื่อง V-R100 (อัปได้หลายไฟล์) — สรุปยอดขายตามบิลและตามสินค้า")
 
-    files = st.file_uploader("เลือกไฟล์ EJ (*.txt)", type=["txt"], accept_multiple_files=True,
-                             key="up_ej_logs", help="ระบบจะรวมหลายวันให้อัตโนมัติ")
+    files = st.file_uploader("เลือกไฟล์ EJ (*.txt)", type=["txt"], accept_multiple_files=True, key="up_ej_logs")
     if files:
         receipts_all, items_all = [], []
         with st.spinner("🔄 กำลังประมวลผลไฟล์..."):
             for f in files:
                 b = f.read()
-                df_r, df_i = parse_receipts_and_items_from_ej_bytes(b)
-                if not df_r.empty:
-                    receipts_all.append(df_r)
-                if not df_i.empty:
-                    items_all.append(df_i)
+                txt = read_text_try(b)
+                r, it = parse_ej_text(txt)
+                if not r.empty:
+                    receipts_all.append(r)
+                if not it.empty:
+                    items_all.append(it)
 
-        # ----- ภาพรวมต่อวัน -----
-        df_receipts = pd.concat(receipts_all, ignore_index=True) if receipts_all else pd.DataFrame(columns=["DATE","TIME","INVOICE","AMOUNT"])
-        if df_receipts.empty:
-            st.warning("⚠️ ไม่พบข้อมูลขายในไฟล์ที่อัปโหลด")
-        else:
-            dates = sorted(df_receipts["DATE"].unique())
-            st.success(f"✅ โหลดข้อมูลสำเร็จ {len(dates)} วัน")
-            sel_date = st.selectbox("📅 เลือกวันที่ต้องการดู", options=dates, index=len(dates)-1)
-            sub = df_receipts[df_receipts["DATE"] == sel_date]
-            col1, col2 = st.columns(2)
-            col1.metric("🧾 จำนวนบิล", f"{len(sub):,}")
-            col2.metric("💰 ยอดรวมทั้งวัน", f"{sub['AMOUNT'].sum():,.2f} ฿")
-            st.dataframe(sub.rename(columns={"TIME":"เวลา","INVOICE":"เลขที่บิล","AMOUNT":"ยอดเงิน (฿)"}),
-                         use_container_width=True, hide_index=True)
+        df_receipts = pd.concat(receipts_all, ignore_index=True) if receipts_all else pd.DataFrame(columns=["amount"])\
+                        .astype({"amount":"float"})
+        df_items    = pd.concat(items_all,    ignore_index=True) if items_all    else pd.DataFrame(columns=["name","qty","amount"])
 
-        # ----- สรุปตามสินค้า -----
-        st.markdown("---")
-        st.markdown("### 📦 สรุปรายการขายตามสินค้า")
-        df_items = pd.concat(items_all, ignore_index=True) if items_all else pd.DataFrame(columns=["receipt","name","qty","amount"])
-        if df_items.empty:
-            st.info("ยังไม่พบรูปแบบบรรทัดรายการในไฟล์ EJ — หาก EJ ของคุณใช้รูปแบบพิเศษ ส่งตัวอย่าง 4–5 บรรทัดช่วงรายการมาได้เลย ผมจะปรับตัวจับให้ครับ")
-        else:
-            df_sum = summarize_items(df_items)
-            st.metric("จำนวนรายการสินค้า (ไม่รวมส่วนลด)", len(df_sum))
-            st.dataframe(df_sum, use_container_width=True, hide_index=True)
+        # KPI
+        total_receipts = len(df_receipts)
+        total_amount = float(df_receipts["amount"].sum()) if total_receipts else float(df_items["amount"].sum())
+        total_qty = int(df_items["qty"].sum()) if not df_items.empty else 0
 
-            xlsx = df_to_excel_bytes(df_sum)
-            st.download_button("⬇️ ดาวน์โหลดสรุปรายการสินค้า (Excel)",
-                               data=xlsx, file_name="ej_item_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("จำนวนบิล (สำเร็จ)", f"{total_receipts:,}")
+        c2.metric("จำนวนชิ้น (รวม)", f"{total_qty:,}")
+        c3.metric("ยอดขายรวม", f"{total_amount:,.2f}")
 
-            with st.expander("ดูบรรทัดรายการที่ดึงได้ (debug)"):
-                st.dataframe(df_items, use_container_width=True, hide_index=True)
+        st.markdown("#### 📦 สรุปยอดตามสินค้า")
+        df_sum = summarize_items(df_items)
+        st.dataframe(df_sum, use_container_width=True, hide_index=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button("⬇️ Export CSV — สรุปตามสินค้า", export_csv_bytes(df_sum),
+                               file_name="EJ_items_summary.csv", mime="text/csv", use_container_width=True)
+        with c2:
+            st.download_button("⬇️ Export Excel — สรุปตามสินค้า", df_to_excel_bytes(df_sum),
+                               file_name="EJ_items_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
 
 # ==================== Footer ====================
 st.markdown("---")
-st.caption("💾 อย่าลืม Restart App หลังนำเข้า SQL • ราคาใช้เฉพาะคอลัมน์ 'ราคาขาย' • แถวโปร (3/4 ชิ้น 100) จะถูกตั้งราคาเป็น 0 ไว้ก่อน")
+st.caption("💾 อย่าลืม Restart App หลังนำเข้า SQL • โปร: 3ชิ้น100→50฿, 4ชิ้น100→35฿, 50/2ชิ้น100→80฿ • ITEMPARMCODE=000001 • TAXCODE_1=01")
