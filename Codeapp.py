@@ -274,7 +274,6 @@ def parse_ej_text(txt: str):
     """คืนค่า (receipts, items) โดย items = list of dict(name, qty, amount).
     ปรับให้ทนทานขึ้นกับไฟล์ที่ต่างกัน: ไม่ต้องพึ่ง Ureceipt, รองรับ CRLF/CR, และบรรทัดยกเลิก/ส่วนลดหลายแบบ"""
     # ทำให้ขึ้นบรรทัดด้วย 
- เสมอ
     txt = txt.replace("
 ", "
 ").replace("
