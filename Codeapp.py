@@ -274,7 +274,7 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสิ�
 
 def parse_ej_text(txt: str):
     """แปลงข้อความ EJ เป็น (df_receipts, df_items, df_discounts)."""
-    txt = txt.replace("
+txt = txt.replace("
 ", "
 ").replace("
 ", "
