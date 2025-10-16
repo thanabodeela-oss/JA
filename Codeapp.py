@@ -240,9 +240,10 @@ def normalize_uploaded_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 # ==================== EJ Parsing ====================
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
 NON_ITEM_KEYWORDS = ("รวม","ยอดสุทธิ","เงินสด","ทอน","บัตร","รับชำระ","ชำระ","ส่วนลด","คูปอง","VAT","ภาษี","หัวบิล","ท้ายบิล","ยกเลิก","VOID")
+DISCOUNT_KEYWORDS = ("ส่วนลด","คูปอง","Coupon","DISCOUNT","โปร","Promotion","โปรฯ")
 # ตัวอย่างบรรทัดสินค้าใน EJ มักเป็น: "2  Product Name      140.00" หรือมีช่องว่าง/ลบ
-PAT_LINE_ITEM = re.compile(r"^\\s*(?P<qty>\\d+)\\s+(?P<name>.+?)\\s+(?P<amt>-?[\\d\\.,\\(\\)]+)\\s*$")
-PAT_DISCOUNT = re.compile(r"^\\s*(?P<name>[^\\d].*?)\\s+(?P<amt>-?[\\d\\.,\\(\\)]+)\\s*$")\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
+PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
+PAT_DISCOUNT = re.compile(r"^\\s*(?P<name>\\D.*?)(?:\\s{2,}|\\t+)(?P<amt>-?\\(?[\\d\\.,]+\\)?)\\s*$")
 
 
 def read_text_try(b: bytes) -> str:
@@ -273,15 +274,23 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสิ�
 
 def parse_ej_text(txt: str):
     """แปลงข้อความ EJ เป็น (df_receipts, df_items, df_discounts)."""
-    txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+    txt = txt.replace("
+", "
+").replace("
+", "
+")
 
     receipts: list[dict] = []
     items: list[dict] = []
     discounts: list[dict] = []
 
-    blocks = re.split(r"\n(?=S\n)", "\n" + txt)
+    blocks = re.split(r"
+(?=S
+)", "
+" + txt)
     for blk in blocks:
-        if not blk.strip().startswith("S\n"):
+        if not blk.strip().startswith("S
+"):
             continue
 
         mode = None
