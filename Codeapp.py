@@ -243,7 +243,7 @@ NON_ITEM_KEYWORDS = ("รวม","ยอดสุทธิ","เงินสด"
 DISCOUNT_KEYWORDS = ("ส่วนลด","คูปอง","Coupon","DISCOUNT","โปร","Promotion","โปรฯ")
 # ตัวอย่างบรรทัดสินค้าใน EJ มักเป็น: "2  Product Name      140.00" หรือมีช่องว่าง/ลบ
 PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
-PAT_DISCOUNT = re.compile(r"^\\s*(?P<name>\\D.*?)(?:\\s{2,}|\\t+)(?P<amt>-?\\(?[\\d\\.,]+\\)?)\\s*$")
+PAT_DISCOUNT = re.compile(r"^\s*(?P<name>\D.*?)(?:\s{2,}|\t+)(?P<amt>-?\(?[\d\.,]+\)?)\s*$")
 
 
 def read_text_try(b: bytes) -> str:
@@ -275,6 +275,10 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสิ�
 def parse_ej_text(txt: str):
     """แปลงข้อความ EJ เป็น (df_receipts, df_items, df_discounts)."""
     txt = txt.replace("
+", "
+").replace("
+", "
+")
 ", "
 ").replace("
 ", "
