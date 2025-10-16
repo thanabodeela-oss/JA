@@ -240,7 +240,8 @@ def normalize_uploaded_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 # ==================== EJ Parsing ====================
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
 NON_ITEM_KEYWORDS = ("รวม","ยอดสุทธิ","เงินสด","ทอน","บัตร","รับชำระ","ชำระ","ส่วนลด","คูปอง","VAT","ภาษี","หัวบิล","ท้ายบิล","ยกเลิก","VOID")
-PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,]+)\s*$")
+# ตัวอย่างบรรทัดสินค้าใน EJ มักเป็น: "2  Product Name      140.00" หรือมีช่องว่าง/ลบ
+PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
 
 
 def read_text_try(b: bytes) -> str:
@@ -270,59 +271,70 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสิ�
 
 
 def parse_ej_text(txt: str):
-    """คืนค่า (receipts, items) โดย items = list of dict(name, qty, amount)."""
+    """คืนค่า (receipts, items) โดย items = list of dict(name, qty, amount).
+    ปรับให้ทนทานขึ้นกับไฟล์ที่ต่างกัน: ไม่ต้องพึ่ง Ureceipt, รองรับ CRLF/CR, และบรรทัดยกเลิก/ส่วนลดหลายแบบ"""
+    # ทำให้ขึ้นบรรทัดด้วย 
+ เสมอ
+    txt = txt.replace("
+", "
+").replace("
+", "
+")
+
     receipts = []
     items = []
 
-    # บล็อกระหว่าง S ... E
-    blocks = re.split(r"\n(?=S\n)", "\n" + txt)
+    # ตัดเป็นบล็อกด้วย S ... E (เริ่มด้วย S ที่ต้นบรรทัด)
+    blocks = re.split(r"
+(?=S
+)", "
+" + txt)
     for blk in blocks:
-        if not blk.strip().startswith("S\n"):
+        if not blk.strip().startswith("S
+"):
             continue
-        # header fields
         mode = None
         price_total = None
-        lines = []
-        in_receipt = False
         canceled = False
+
+        # เก็บบรรทัดที่ขึ้นต้นด้วย B ภายในบล็อก
+        b_lines = []
         for raw in blk.splitlines():
             if raw.startswith("HMODE="):
                 mode = raw.split("=",1)[1].strip()
             elif raw.startswith("HPRICE="):
                 price_total = raw.split("=",1)[1].strip()
-            elif raw.startswith("Ureceipt"):
-                in_receipt = True
             elif raw.startswith("B"):
-                s = raw[1:].rstrip()
-                if in_receipt:
-                    t = s.strip()
-                    if "ยกเลิก" in t or "VOID" in t:
-                        canceled = True
-                    lines.append(t)
-        if mode != "REG":
+                t = raw[1:].strip()
+                if any(k in t for k in ["ยกเลิก","VOID","Cancel","CANCEL"]):
+                    canceled = True
+                b_lines.append(t)
+
+        # เฉพาะบิลขาย (REG หรือไม่มี HMODE ก็ยอมรับ) + ไม่ถูกยกเลิก
+        if mode not in (None, "REG", "REG "):
             continue
         if canceled:
             continue
 
-        # ดึงรายการสินค้า
-        for t in lines:
-            # ตัดบรรทัดที่เป็นสรุป/ส่วนลด
-            if any(k in t for k in NON_ITEM_KEYWORDS):
+        # แปลงรายการสินค้า
+        for t in b_lines:
+            # ข้ามบรรทัดสรุป/ส่วนลด/ภาษี/ชำระเงิน
+            if any(k in t for k in NON_ITEM_KEYWORDS + ("ส่วนลดพิเศษ","คูปองส่วนลด","เงินทอน","รวมทั้งสิ้น","สุทธิ")):
                 continue
             m = PAT_LINE_ITEM.match(t)
             if not m:
                 continue
             name = m.group("name").strip()
             qty = int(m.group("qty"))
-            amt = num_from_text(m.group("amt"))
+            amt_text = m.group("amt").strip()
+            # รองรับรูปแบบ (140.00) เป็นเลขลบ
+            if amt_text.startswith("(") and amt_text.endswith(")"):
+                amt_text = "-" + amt_text[1:-1]
+            amt = num_from_text(amt_text)
             items.append({"name": name, "qty": qty, "amount": amt})
 
-        # เก็บใบเสร็จแบบหยาบ
         if price_total and price_total.strip():
-            try:
-                receipts.append({"amount": num_from_text(price_total)})
-            except Exception:
-                pass
+            receipts.append({"amount": num_from_text(price_total)})
 
     return pd.DataFrame(receipts), pd.DataFrame(items)
 
