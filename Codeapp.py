@@ -630,7 +630,7 @@ with tab_sales:
         )
         total_qty = int(df_items["qty"].sum()) if not df_items.empty else 0
         
-        # Display metrics
+        # Display KPIs
         col1, col2, col3 = st.columns(3)
         col1.metric("จำนวนบิล (สำเร็จ)", f"{total_receipts:,}")
         col2.metric("จำนวนชิ้น (รวม)", f"{total_qty:,}")
@@ -638,8 +638,8 @@ with tab_sales:
         
         # Item summary
         st.markdown("#### 📦 สรุปยอดตามสินค้า")
-        df_item_summary = summarize_items(df_items)
-        st.dataframe(df_item_summary, use_container_width=True, hide_index=True)
+        df_summary = summarize_items(df_items)
+        st.dataframe(df_summary, use_container_width=True, hide_index=True)
         
         # Discount summary
         st.markdown("#### 🧾 ส่วนลด/คูปองที่ใช้")
@@ -656,12 +656,12 @@ with tab_sales:
             )
             st.dataframe(df_discount_summary, use_container_width=True, hide_index=True)
         
-        # Export buttons for items
+        # Export buttons for item summary
         col1, col2 = st.columns(2)
         with col1:
             st.download_button(
                 "⬇️ Export CSV — สรุปตามสินค้า",
-                export_csv_to_bytes(df_item_summary),
+                export_csv_to_bytes(df_summary),
                 file_name="EJ_items_summary.csv",
                 mime="text/csv",
                 use_container_width=True
@@ -669,13 +669,13 @@ with tab_sales:
         with col2:
             st.download_button(
                 "⬇️ Export Excel — สรุปตามสินค้า",
-                export_excel_to_bytes(df_item_summary),
+                export_excel_to_bytes(df_summary),
                 file_name="EJ_items_summary.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         
-        # Export buttons for discounts
+        # Export buttons for discount summary (if exists)
         if not df_discounts.empty:
             col3, col4 = st.columns(2)
             with col3:
