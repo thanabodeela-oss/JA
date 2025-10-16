@@ -271,57 +271,48 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสิ�
 
 
 def parse_ej_text(txt: str):
-    """คืนค่า (receipts, items) โดย items = list of dict(name, qty, amount).
-    ปรับให้ทนทานขึ้นกับไฟล์ที่ต่างกัน: ไม่ต้องพึ่ง Ureceipt, รองรับ CRLF/CR, และบรรทัดยกเลิก/ส่วนลดหลายแบบ"""
-    # ทำให้ขึ้นบรรทัดด้วย 
- เสมอ
-    txt = txt.replace("
-", "
-").replace("
-", "
-")).replace("
-", "
-")
+    """แปลงข้อความ EJ เป็น (df_receipts, df_items).
+    - รองรับ \r\n, \r, \n
+    - ไม่พึ่ง Ureceipt
+    - ข้ามบิลยกเลิก / บรรทัดสรุป
+    """
+    # ปรับบรรทัดให้เป็น \n เสมอ
+    txt = txt.replace("\r\n", "\n").replace("\r", "\n")
 
-    receipts = []
-    items = []
+    receipts: list[dict] = []
+    items: list[dict] = []
 
-    # ตัดเป็นบล็อกด้วย S ... E (เริ่มด้วย S ที่ต้นบรรทัด)
-    blocks = re.split(r"
-(?=S
-)", "
-" + txt)
+    # แยกบล็อกใบเสร็จด้วยตัวอักษร S ที่ขึ้นต้นบรรทัด
+    blocks = re.split(r"\n(?=S\n)", "\n" + txt)
     for blk in blocks:
-        if not blk.strip().startswith("S
-"):
+        if not blk.strip().startswith("S\n"):
             continue
+
         mode = None
         price_total = None
         canceled = False
+        b_lines: list[str] = []
 
-        # เก็บบรรทัดที่ขึ้นต้นด้วย B ภายในบล็อก
-        b_lines = []
         for raw in blk.splitlines():
             if raw.startswith("HMODE="):
-                mode = raw.split("=",1)[1].strip()
+                mode = raw.split("=", 1)[1].strip()
             elif raw.startswith("HPRICE="):
-                price_total = raw.split("=",1)[1].strip()
+                price_total = raw.split("=", 1)[1].strip()
             elif raw.startswith("B"):
                 t = raw[1:].strip()
-                if any(k in t for k in ["ยกเลิก","VOID","Cancel","CANCEL"]):
+                if any(k in t for k in ("ยกเลิก", "VOID", "Cancel", "CANCEL")):
                     canceled = True
                 b_lines.append(t)
 
-        # เฉพาะบิลขาย (REG หรือไม่มี HMODE ก็ยอมรับ) + ไม่ถูกยกเลิก
+        # เฉพาะบิลขายปกติ และไม่ยกเลิก
         if mode not in (None, "REG", "REG "):
             continue
         if canceled:
             continue
 
-        # แปลงรายการสินค้า
+        # ดึงรายการสินค้า
         for t in b_lines:
-            # ข้ามบรรทัดสรุป/ส่วนลด/ภาษี/ชำระเงิน
-            if any(k in t for k in NON_ITEM_KEYWORDS + ("ส่วนลดพิเศษ","คูปองส่วนลด","เงินทอน","รวมทั้งสิ้น","สุทธิ")):
+            if any(k in t for k in NON_ITEM_KEYWORDS + ("ส่วนลดพิเศษ", "คูปองส่วนลด", "เงินทอน", "รวมทั้งสิ้น", "สุทธิ")):
                 continue
             m = PAT_LINE_ITEM.match(t)
             if not m:
@@ -329,7 +320,6 @@ def parse_ej_text(txt: str):
             name = m.group("name").strip()
             qty = int(m.group("qty"))
             amt_text = m.group("amt").strip()
-            # รองรับรูปแบบ (140.00) เป็นเลขลบ
             if amt_text.startswith("(") and amt_text.endswith(")"):
                 amt_text = "-" + amt_text[1:-1]
             amt = num_from_text(amt_text)
