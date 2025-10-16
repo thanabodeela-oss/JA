@@ -241,7 +241,8 @@ def normalize_uploaded_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
 NON_ITEM_KEYWORDS = ("รวม","ยอดสุทธิ","เงินสด","ทอน","บัตร","รับชำระ","ชำระ","ส่วนลด","คูปอง","VAT","ภาษี","หัวบิล","ท้ายบิล","ยกเลิก","VOID")
 # ตัวอย่างบรรทัดสินค้าใน EJ มักเป็น: "2  Product Name      140.00" หรือมีช่องว่าง/ลบ
-PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
+PAT_LINE_ITEM = re.compile(r"^\\s*(?P<qty>\\d+)\\s+(?P<name>.+?)\\s+(?P<amt>-?[\\d\\.,\\(\\)]+)\\s*$")
+PAT_DISCOUNT = re.compile(r"^\\s*(?P<name>[^\\d].*?)\\s+(?P<amt>-?[\\d\\.,\\(\\)]+)\\s*$")\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
 
 
 def read_text_try(b: bytes) -> str:
@@ -271,18 +272,13 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="สรุปตามสิ�
 
 
 def parse_ej_text(txt: str):
-    """แปลงข้อความ EJ เป็น (df_receipts, df_items).
-    - รองรับ \r\n, \r, \n
-    - ไม่พึ่ง Ureceipt
-    - ข้ามบิลยกเลิก / บรรทัดสรุป
-    """
-    # ปรับบรรทัดให้เป็น \n เสมอ
+    """แปลงข้อความ EJ เป็น (df_receipts, df_items, df_discounts)."""
     txt = txt.replace("\r\n", "\n").replace("\r", "\n")
 
     receipts: list[dict] = []
     items: list[dict] = []
+    discounts: list[dict] = []
 
-    # แยกบล็อกใบเสร็จด้วยตัวอักษร S ที่ขึ้นต้นบรรทัด
     blocks = re.split(r"\n(?=S\n)", "\n" + txt)
     for blk in blocks:
         if not blk.strip().startswith("S\n"):
@@ -304,15 +300,23 @@ def parse_ej_text(txt: str):
                     canceled = True
                 b_lines.append(t)
 
-        # เฉพาะบิลขายปกติ และไม่ยกเลิก
         if mode not in (None, "REG", "REG "):
             continue
         if canceled:
             continue
 
-        # ดึงรายการสินค้า
         for t in b_lines:
-            if any(k in t for k in NON_ITEM_KEYWORDS + ("ส่วนลดพิเศษ", "คูปองส่วนลด", "เงินทอน", "รวมทั้งสิ้น", "สุทธิ")):
+            if any(k in t for k in DISCOUNT_KEYWORDS):
+                m2 = PAT_DISCOUNT.match(t)
+                if m2:
+                    name2 = m2.group("name").strip()
+                    amt_text2 = m2.group("amt").strip()
+                    if amt_text2.startswith("(") and amt_text2.endswith(")"):
+                        amt_text2 = "-" + amt_text2[1:-1]
+                    disc_amt = num_from_text(amt_text2)
+                    discounts.append({"discount": name2, "amount": disc_amt})
+                continue
+            if any(k in t for k in NON_ITEM_KEYWORDS):
                 continue
             m = PAT_LINE_ITEM.match(t)
             if not m:
@@ -328,7 +332,7 @@ def parse_ej_text(txt: str):
         if price_total and price_total.strip():
             receipts.append({"amount": num_from_text(price_total)})
 
-    return pd.DataFrame(receipts), pd.DataFrame(items)
+    return pd.DataFrame(receipts), pd.DataFrame(items), pd.DataFrame(discounts)
 
 
 def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
@@ -412,20 +416,22 @@ with tab_sales:
 
     files = st.file_uploader("เลือกไฟล์ EJ (*.txt)", type=["txt"], accept_multiple_files=True, key="up_ej_logs")
     if files:
-        receipts_all, items_all = [], []
+        receipts_all, items_all, disc_all = [], [], []
         with st.spinner("🔄 กำลังประมวลผลไฟล์..."):
             for f in files:
                 b = f.read()
                 txt = read_text_try(b)
-                r, it = parse_ej_text(txt)
+                r, it, dc = parse_ej_text(txt)
                 if not r.empty:
                     receipts_all.append(r)
                 if not it.empty:
                     items_all.append(it)
+                if not dc.empty:
+                    disc_all.append(dc)
 
-        df_receipts = pd.concat(receipts_all, ignore_index=True) if receipts_all else pd.DataFrame(columns=["amount"])\
-                        .astype({"amount":"float"})
+        df_receipts = pd.concat(receipts_all, ignore_index=True) if receipts_all else pd.DataFrame(columns=["amount"]).astype({"amount":"float"})
         df_items    = pd.concat(items_all,    ignore_index=True) if items_all    else pd.DataFrame(columns=["name","qty","amount"])
+        df_discounts= pd.concat(disc_all,     ignore_index=True) if disc_all     else pd.DataFrame(columns=["discount","amount"])
 
         # KPI
         total_receipts = len(df_receipts)
@@ -441,6 +447,21 @@ with tab_sales:
         df_sum = summarize_items(df_items)
         st.dataframe(df_sum, use_container_width=True, hide_index=True)
 
+        # ===== ส่วนลด =====
+        st.markdown("#### 🧾 ส่วนลด/คูปองที่ใช้")
+        if df_discounts.empty:
+            st.info("ไม่มีการใช้ส่วนลดในไฟล์ที่อัปโหลด")
+        else:
+            df_disc_sum = (
+                df_discounts
+                .assign(times=1)
+                .groupby("discount", as_index=False)
+                .agg(จำนวนครั้ง=("times","sum"), มูลค่ารวมลด=("amount","sum"))
+                .sort_values(["จำนวนครั้ง","มูลค่ารวมลด"], ascending=[False, True])
+                .rename(columns={"discount":"ส่วนลด"})
+            )
+            st.dataframe(df_disc_sum, use_container_width=True, hide_index=True)
+
         c1, c2 = st.columns(2)
         with c1:
             st.download_button("⬇️ Export CSV — สรุปตามสินค้า", export_csv_bytes(df_sum),
@@ -449,6 +470,17 @@ with tab_sales:
             st.download_button("⬇️ Export Excel — สรุปตามสินค้า", df_to_excel_bytes(df_sum),
                                file_name="EJ_items_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                use_container_width=True)
+
+        # ปุ่ม export ส่วนลด (ถ้ามี)
+        if not df_discounts.empty:
+            c3, c4 = st.columns(2)
+            with c3:
+                st.download_button("⬇️ Export CSV — ส่วนลด/คูปอง", export_csv_bytes(df_disc_sum),
+                                   file_name="EJ_discounts_summary.csv", mime="text/csv", use_container_width=True)
+            with c4:
+                st.download_button("⬇️ Export Excel — ส่วนลด/คูปอง", df_to_excel_bytes(df_disc_sum, sheet_name="ส่วนลด"),
+                                   file_name="EJ_discounts_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True)
 
 # ==================== Footer ====================
 st.markdown("---")
