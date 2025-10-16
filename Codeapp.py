@@ -439,9 +439,17 @@ with tab_sales:
             df_discount_summary = (
                 df_discounts
                 .groupby("discount", as_index=False)
-                .agg(จำนวนครั้ง=("times","sum"), มูลค่ารวมลด=("amount","sum"))
-                .sort_values(["จำนวนครั้ง","มูลค่ารวมลด"], ascending=[False, True])
-                .rename(columns={"discount":"ส่วนลด"})
+                .agg({"times": "sum", "amount": "sum"})
+            )
+            # ตั้งชื่อคอลัมน์ให้แน่นอนก่อนค่อย sort
+            df_discount_summary = (
+                df_discount_summary
+                .rename(columns={
+                    "discount": "ส่วนลด",
+                    "times": "จำนวนครั้ง",
+                    "amount": "มูลค่ารวมลด",
+                })
+                .sort_values(["จำนวนครั้ง", "มูลค่ารวมลด"], ascending=[False, True])
             )
             st.dataframe(df_discount_summary, use_container_width=True, hide_index=True)
 
