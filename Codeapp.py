@@ -179,13 +179,13 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     col_unitqty  = pick_column(["UNITQTY","QTY","PACK","ชิ้นต่อแพ็ค","รวมชิ้นต่อแพ็ค","หน่วยต่อแพ็ค"])
 
     # ⬇️ ราคา: ให้ 'ราคาขายต่อชิ้น' มาก่อน และค่อย fallback ตามลำดับ
-col_price = pick_column([
-    "ราคาต่อชิ้น",        # ⬅️ เพิ่มคำนี้
-    "ราคาขายต่อชิ้น",     # (ถ้ามีไฟล์บางแบบใช้คำนี้)
-    "ราคาต่อหน่วย",
-    "UNIT PRICE", "RETAIL PRICE", "PRICE",
-    "ราคาขาย"             # ทางเลือกท้ายสุด เหมือนเดิม
-])
+    col_price = pick_column([
+        "ราคาต่อชิ้น",        # ⬅️ เพิ่มคำนี้
+        "ราคาขายต่อชิ้น",     # (ถ้ามีไฟล์บางแบบใช้คำนี้)
+        "ราคาต่อหน่วย",
+        "UNIT PRICE", "RETAIL PRICE", "PRICE",
+        "ราคาขาย"             # ทางเลือกท้ายสุด เหมือนเดิม
+    ])
 
     out = pd.DataFrame()
     out["ITEMCODE"]  = df_raw[col_itemcode] if col_itemcode else ""
