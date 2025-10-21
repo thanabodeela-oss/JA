@@ -35,7 +35,7 @@ CANDIDATE_HEADERS = {
     "ชื่อสินค้า", "ITEMNAME", "NAME ITEM", "NAMEITEM", "รายการสินค้า", "SKU DESCRIPTION",
     "บาร์โค้ด", "BARCODE", "UNIT BARCODE", "SCANCODE1",
     "UNITQTY", "QTY", "PACK", "ชิ้นต่อแพ็ค", "รวมชิ้นต่อแพ็ค", "หน่วยต่อแพ็ค",
-    "ราคาขาย", "PRICE", "UNIT PRICE", "RETAIL PRICE", "ราคาต่อหน่วย",
+     "PRICE", "UNIT PRICE", "RETAIL PRICE", "ราคาต่อหน่วย",
     "ราคาต่อชิ้น"   # ⬅️ เพิ่มบรรทัดนี้
 }
 
@@ -172,19 +172,17 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
                 return column_map[key]
         return None
 
-    # --- map คอลัมน์หลัก ---
+    # คอลัมน์หลัก
     col_itemcode = pick_column(["รหัสสินค้า","ITEM CODE","ITEMCODE","SAPID","MATERIAL","MATERIAL ID"])
     col_itemname = pick_column(["ชื่อสินค้า","ITEMNAME","NAMEITEM","NAME ITEM","SKU DESCRIPTION","รายการสินค้า"])
     col_barcode  = pick_column(["บาร์โค้ด","BARCODE","UNIT BARCODE","SCANCODE1"])
     col_unitqty  = pick_column(["UNITQTY","QTY","PACK","ชิ้นต่อแพ็ค","รวมชิ้นต่อแพ็ค","หน่วยต่อแพ็ค"])
 
-    # ⬇️ ราคา: ให้ 'ราคาขายต่อชิ้น' มาก่อน และค่อย fallback ตามลำดับ
-    col_price = pick_column([
-        "ราคาต่อชิ้น",        # ⬅️ เพิ่มคำนี้
-        "ราคาขายต่อชิ้น",     # (ถ้ามีไฟล์บางแบบใช้คำนี้)
-        "ราคาต่อหน่วย",
-        "UNIT PRICE", "RETAIL PRICE", "PRICE",
-        "ราคาขาย"             # ทางเลือกท้ายสุด เหมือนเดิม
+    # ราคาแบบ “เฉพาะคอลัมน์ราคาต่อชิ้น”
+    col_price_piece = pick_column(["ราคาต่อชิ้น","ราคาขายต่อชิ้น"])
+    # (fallback เดิม ถ้าไฟล์ไม่มีราคาต่อชิ้นจริง ๆ)
+    col_price_fallback = pick_column([
+        "ราคาต่อหน่วย","UNIT PRICE","RETAIL PRICE","PRICE","ราคาขาย"
     ])
 
     out = pd.DataFrame()
@@ -193,33 +191,45 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     out["SCANCODE1"] = df_raw[col_barcode]  if col_barcode  else ""
     out["UNITQTY"]   = pd.to_numeric(df_raw[col_unitqty], errors="coerce").fillna(1).astype(int) if col_unitqty else 1
 
-    # --- ราคา (เลขล้วน) ---
-    if col_price:
-        raw_price = df_raw[col_price].astype(str).str.strip()
-        # รองรับ 1,234.50 หรือ 1234.50 และตัด ฿ ออก
+    # ---------- ราคา (เงื่อนไขสำคัญ) ----------
+    if col_price_piece:
+        # ใช้คอลัมน์ “ราคาต่อชิ้น” อย่างเดียว ไม่เอาโปร/ข้อความอื่นมา override
+        raw_price = df_raw[col_price_piece].astype(str).str.strip()
+        base_baht = pd.to_numeric(
+            raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False),
+            errors="coerce"
+        )
+    elif col_price_fallback:
+        # กรณีไม่มีราคาต่อชิ้น ค่อย fallback แบบเดิม
+        raw_price = df_raw[col_price_fallback].astype(str).str.strip()
         is_numeric = raw_price.str.fullmatch(r"[+-]?\d+(?:[.,]\d+)?")
         base_baht = pd.to_numeric(
             raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False),
             errors="coerce"
         ).where(is_numeric)
+
+        # ใช้กฎ promo override เฉพาะกรณี fallback เท่านั้น
+        thai_to_arabic = str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789")
+        row_texts = df_raw.apply(
+            lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(thai_to_arabic).lower(),
+            axis=1
+        )
+        promo_rules = [
+            (re.compile(r"3\s*ชิ้น\s*100"), 50.0),
+            (re.compile(r"4\s*ชิ้น\s*100"), 35.0),
+            (re.compile(r"50\s*/\s*2\s*ชิ้น\s*100"), 80.0),
+        ]
+        override = pd.Series([None]*len(df_raw), index=df_raw.index, dtype="object")
+        for pattern, baht in promo_rules:
+            override.loc[row_texts.str.contains(pattern, regex=True, na=False)] = baht
+        base_baht = base_baht.astype("float")
+        base_baht.loc[override.notna()] = override[override.notna()].astype(float)
     else:
         base_baht = pd.Series([None]*len(df_raw), index=df_raw.index, dtype="float")
+
     out["UNITPRICE"] = base_baht
 
-    # --- โปรข้อความคงที่ (ถ้ามี ลบ/override ราคา) ---
-    thai_to_arabic = str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789")
-    row_texts = df_raw.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(thai_to_arabic).lower(), axis=1)
-    promo_rules = [
-        (re.compile(r"3\s*ชิ้น\s*100"), 50.0),
-        (re.compile(r"4\s*ชิ้น\s*100"), 35.0),
-        (re.compile(r"50\s*/\s*2\s*ชิ้น\s*100"), 80.0),
-    ]
-    override = pd.Series([None]*len(df_raw), index=df_raw.index, dtype="object")
-    for pattern, baht in promo_rules:
-        override.loc[row_texts.str.contains(pattern, regex=True, na=False)] = baht
-    out.loc[override.notna(), "UNITPRICE"] = override[override.notna()].astype(float)
-
-    # --- ค่า default อื่น ๆ ---
+    # ค่าคงที่อื่น ๆ
     out["ITEMPARMCODE"] = "000001"
     out["UNITWEIGHT"]   = 0
     out["TAXCODE_1"]    = "01"
@@ -227,10 +237,10 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     for c in ["ITEMCODE","ITEMNAME","SCANCODE1","ITEMPARMCODE","TAXCODE_1"]:
         out[c] = out[c].astype("string").fillna("").astype(str).str.strip()
 
-    # แปลงบาท -> สตางค์ (int)
+    # แปลงบาท -> สตางค์
     out["UNITPRICE"] = out["UNITPRICE"].fillna(0).apply(to_satang)
 
-    # ตัดแถวว่าง (ทั้ง ITEMCODE และ ITEMNAME ว่าง)
+    # ตัดแถวว่าง
     out = out[~((out["ITEMCODE"] == "") & (out["ITEMNAME"] == ""))].reset_index(drop=True)
     return out
 
