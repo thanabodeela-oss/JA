@@ -44,14 +44,11 @@ NON_ITEM_KEYWORDS = (
     "รวม", "ยอดสุทธิ", "เงินสด", "ทอน", "บัตร", "รับชำระ", "ชำระ",
     "ส่วนลด", "คูปอง", "VAT", "ภาษี", "หัวบิล", "ท้ายบิล", "ยกเลิก", "VOID"
 )
-# คีย์เวิร์ดที่ถือว่าเป็นบรรทัดส่วนลด/โปร (จะถูกดึงไปตารางส่วนลด)
 DISCOUNT_KEYWORDS = (
     "ส่วนลด", "คูปอง", "Coupon", "DISCOUNT", "โปร", "Promotion", "โปรฯ"
 )
 
-# Regex patterns (สินค้า/ส่วนลด)
 PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
-# อนุญาตให้มีจำนวนขึ้นต้นของบรรทัดส่วนลดได้ เช่น "2 ส่วนลด 3 ชิ้น 100  -100.00"
 PAT_DISCOUNT  = re.compile(r"^\s*(?:(?P<qty>\d+)\s+)?(?P<name>.+?)\s+(?P<amt>-?\(?[\d\.,]+\)?)\s*$")
 
 # ==================== UTILITY FUNCTIONS ====================
@@ -111,32 +108,56 @@ def export_excel_to_bytes(df: pd.DataFrame, sheet_name="สรุปตามส
     buffer.seek(0)
     return buffer.getvalue()
 
-# ==================== EXCEL READING ====================
-def read_excel_smart(file_obj) -> pd.DataFrame:
+# ==================== EXCEL READING (FIXED) ====================
+def read_excel_smart(file_obj, manual_sheet: str | None = None) -> tuple[pd.DataFrame, str, int]:
+    """
+    อ่านไฟล์ Excel แบบฉลาด:
+    - สแกน 'ทุกชีท' และ 'หลายแถวแรก' เพื่อหาแถวหัวตารางที่ดีที่สุดตาม CANDIDATE_HEADERS (+โบนัสคำว่า 'ราคา')
+    - คืนค่า (DataFrame, ชื่อชีทที่เลือก, แถวหัวตารางที่เลือก)
+    - ถ้า manual_sheet ระบุมา จะใช้ชีทนั้น (ยังคงหาแถวหัวตารางที่เหมาะในชีทนั้น)
+    """
     data = file_obj.read()
     excel_file = pd.ExcelFile(BytesIO(data))
-    # เลือกชีท
-    if "ยอดขาย" in excel_file.sheet_names:
-        target_sheet = "ยอดขาย"
-    else:
-        target_sheet = None
-        for sheet_name in excel_file.sheet_names:
-            probe = pd.read_excel(BytesIO(data), sheet_name=sheet_name, nrows=1, header=None)
-            if probe.astype(str).apply(lambda s: s.str.contains("ราคา", na=False)).any(axis=None):
-                target_sheet = sheet_name
-                break
-        if not target_sheet:
-            target_sheet = excel_file.sheet_names[0]
-    # หา header row
-    df_probe = pd.read_excel(BytesIO(data), sheet_name=target_sheet, header=None, dtype=str)
-    best_row, best_score = 0, -1
+
+    target_sheets = [manual_sheet] if manual_sheet else excel_file.sheet_names
+
+    best_sheet = None
+    best_row   = 0
+    best_score = -1
     candidate_set = {canonicalize_text(h) for h in CANDIDATE_HEADERS}
-    for i in range(min(10, len(df_probe))):
-        row = [str(x) if pd.notna(x) else "" for x in df_probe.iloc[i].tolist()]
-        score = sum(1 for v in row if canonicalize_text(v) in candidate_set)
-        if score > best_score:
-            best_score, best_row = score, i
-    return pd.read_excel(BytesIO(data), sheet_name=target_sheet, header=best_row, dtype=str)
+
+    for sheet_name in target_sheets:
+        df_probe = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=None, dtype=str)
+        limit = min(20, len(df_probe))
+        local_best_row = 0
+        local_best_score = -1
+
+        for i in range(limit):
+            row = [str(x) if pd.notna(x) else "" for x in df_probe.iloc[i].tolist()]
+            score = sum(1 for v in row if canonicalize_text(v) in candidate_set)
+            # โบนัสถ้ามีคำว่า "ราคา" ในแถวนี้
+            if any("ราคา" in str(v) for v in row):
+                score += 2
+            # โบนัสเล็กน้อยถ้ามีจำนวนคอลัมน์ที่ไม่ว่างเยอะ (มักเป็นหัวตารางจริง)
+            non_empty_cols = sum(1 for v in row if str(v).strip() != "")
+            score += min(non_empty_cols, 3) * 0.1
+
+            if score > local_best_score:
+                local_best_score = score
+                local_best_row = i
+
+        if local_best_score > best_score:
+            best_score = local_best_score
+            best_sheet = sheet_name
+            best_row   = local_best_row
+
+    # fallback
+    if best_sheet is None:
+        best_sheet = target_sheets[0]
+        best_row = 0
+
+    df = pd.read_excel(BytesIO(data), sheet_name=best_sheet, header=best_row, dtype=str)
+    return df, best_sheet, best_row
 
 # ==================== NORMALIZE PRODUCT DF ====================
 def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
@@ -249,7 +270,6 @@ def extract_number_from_text(text: str) -> float:
 
 def parse_ej_text(text: str):
     """Parse EJ text and return (receipts, items, discounts)."""
-    # Normalize line endings (ต้องมีบรรทัดนี้ตรงตามนี้เท่านั้น ป้องกัน syntax error)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     receipts = []
@@ -283,7 +303,6 @@ def parse_ej_text(text: str):
             continue
 
         for text_line in body_lines:
-            # ส่วนลด / คูปอง
             if any(keyword in text_line for keyword in DISCOUNT_KEYWORDS):
                 m2 = PAT_DISCOUNT.match(text_line)
                 if m2:
@@ -297,11 +316,9 @@ def parse_ej_text(text: str):
                     discounts.append({"discount": discount_name, "amount": discount_amount, "times": times})
                 continue
 
-            # ข้ามบรรทัดสรุป/ชำระเงิน/VAT
             if any(keyword in text_line for keyword in NON_ITEM_KEYWORDS):
                 continue
 
-            # รายการสินค้า
             m = PAT_LINE_ITEM.match(text_line)
             if not m:
                 continue
@@ -317,7 +334,6 @@ def parse_ej_text(text: str):
             receipts.append({"amount": extract_number_from_text(price_total)})
 
     return pd.DataFrame(receipts), pd.DataFrame(items), pd.DataFrame(discounts)
-
 
 def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
     if df_items.empty:
@@ -350,13 +366,26 @@ with tab_product:
     uploaded_file = st.file_uploader("เลือกไฟล์ Excel หรือ CSV", type=["xlsx", "csv"], key="upload_product")
     if uploaded_file is not None:
         with st.spinner("🔄 กำลังประมวลผลไฟล์..."):
-            if uploaded_file.name.lower().endswith(".csv"):
+            manual_sheet = None
+            if uploaded_file.name.lower().endswith(".xlsx"):
+                # ให้ผู้ใช้ override ชีทได้ถ้าต้องการ
+                data_first = uploaded_file.getvalue()
+                xls = pd.ExcelFile(BytesIO(data_first))
+                with st.expander("🗂️ เลือกชีทเอง (ไม่บังคับ)"):
+                    manual_sheet = st.selectbox("ชีทที่ต้องการอ่าน", [None] + xls.sheet_names, index=0, format_func=lambda x: "อัตโนมัติ" if x is None else x)
+                # ต้องสร้างไฟล์ใหม่จาก bytes เพราะ file_uploader ถูกอ่านไปแล้ว
+                uploaded_file = BytesIO(data_first)
+
+            if str(getattr(uploaded_file, "name", "")).lower().endswith(".csv"):
                 df_raw = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False)
+                chosen_sheet = "CSV"
+                header_row = 0
             else:
-                df_raw = read_excel_smart(uploaded_file)
+                df_raw, chosen_sheet, header_row = read_excel_smart(uploaded_file, manual_sheet=manual_sheet)
+
             df_normalized = normalize_uploaded_dataframe(df_raw)
 
-        st.success(f"✅ นำเข้าสำเร็จ {len(df_normalized):,} รายการ")
+        st.success(f"✅ นำเข้าสำเร็จ {len(df_normalized):,} รายการ • ใช้ชีท: {chosen_sheet} • แถวหัวตาราง: {header_row}")
         with st.expander("👀 ดูข้อมูลที่นำเข้า (30 รายการแรก)", expanded=True):
             st.dataframe(df_normalized.head(30), use_container_width=True, hide_index=True)
 
@@ -441,7 +470,6 @@ with tab_sales:
                 .groupby("discount", as_index=False)
                 .agg({"times": "sum", "amount": "sum"})
             )
-            # ตั้งชื่อคอลัมน์ให้แน่นอนก่อนค่อย sort
             df_discount_summary = (
                 df_discount_summary
                 .rename(columns={
