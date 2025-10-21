@@ -35,7 +35,8 @@ CANDIDATE_HEADERS = {
     "ชื่อสินค้า", "ITEMNAME", "NAME ITEM", "NAMEITEM", "รายการสินค้า", "SKU DESCRIPTION",
     "บาร์โค้ด", "BARCODE", "UNIT BARCODE", "SCANCODE1",
     "UNITQTY", "QTY", "PACK", "ชิ้นต่อแพ็ค", "รวมชิ้นต่อแพ็ค", "หน่วยต่อแพ็ค",
-    "ราคาขาย", "PRICE", "UNIT PRICE", "RETAIL PRICE", "ราคาต่อหน่วย"
+    "ราคาขาย", "PRICE", "UNIT PRICE", "RETAIL PRICE", "ราคาต่อหน่วย",
+    "ราคาต่อชิ้น"   # ⬅️ เพิ่มบรรทัดนี้
 }
 
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
@@ -178,11 +179,13 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     col_unitqty  = pick_column(["UNITQTY","QTY","PACK","ชิ้นต่อแพ็ค","รวมชิ้นต่อแพ็ค","หน่วยต่อแพ็ค"])
 
     # ⬇️ ราคา: ให้ 'ราคาขายต่อชิ้น' มาก่อน และค่อย fallback ตามลำดับ
-    col_price = pick_column([
-        "ราคาขายต่อชิ้น", "ราคาต่อชิ้น", "ราคาต่อหน่วย",
-        "UNIT PRICE", "RETAIL PRICE", "PRICE",
-        "ราคาขาย"  # ใช้เป็นทางเลือกสุดท้าย
-    ])
+col_price = pick_column([
+    "ราคาต่อชิ้น",        # ⬅️ เพิ่มคำนี้
+    "ราคาขายต่อชิ้น",     # (ถ้ามีไฟล์บางแบบใช้คำนี้)
+    "ราคาต่อหน่วย",
+    "UNIT PRICE", "RETAIL PRICE", "PRICE",
+    "ราคาขาย"             # ทางเลือกท้ายสุด เหมือนเดิม
+])
 
     out = pd.DataFrame()
     out["ITEMCODE"]  = df_raw[col_itemcode] if col_itemcode else ""
