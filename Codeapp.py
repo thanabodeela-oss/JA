@@ -171,11 +171,18 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
                 return column_map[key]
         return None
 
+    # --- map คอลัมน์หลัก ---
     col_itemcode = pick_column(["รหัสสินค้า","ITEM CODE","ITEMCODE","SAPID","MATERIAL","MATERIAL ID"])
     col_itemname = pick_column(["ชื่อสินค้า","ITEMNAME","NAMEITEM","NAME ITEM","SKU DESCRIPTION","รายการสินค้า"])
     col_barcode  = pick_column(["บาร์โค้ด","BARCODE","UNIT BARCODE","SCANCODE1"])
-    col_price    = pick_column(["ราคาขาย","PRICE","UNIT PRICE","RETAIL PRICE","ราคาต่อหน่วย"])
     col_unitqty  = pick_column(["UNITQTY","QTY","PACK","ชิ้นต่อแพ็ค","รวมชิ้นต่อแพ็ค","หน่วยต่อแพ็ค"])
+
+    # ⬇️ ราคา: ให้ 'ราคาขายต่อชิ้น' มาก่อน และค่อย fallback ตามลำดับ
+    col_price = pick_column([
+        "ราคาขายต่อชิ้น", "ราคาต่อชิ้น", "ราคาต่อหน่วย",
+        "UNIT PRICE", "RETAIL PRICE", "PRICE",
+        "ราคาขาย"  # ใช้เป็นทางเลือกสุดท้าย
+    ])
 
     out = pd.DataFrame()
     out["ITEMCODE"]  = df_raw[col_itemcode] if col_itemcode else ""
@@ -183,9 +190,10 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     out["SCANCODE1"] = df_raw[col_barcode]  if col_barcode  else ""
     out["UNITQTY"]   = pd.to_numeric(df_raw[col_unitqty], errors="coerce").fillna(1).astype(int) if col_unitqty else 1
 
-    # ราคา (เลขล้วน)
+    # --- ราคา (เลขล้วน) ---
     if col_price:
         raw_price = df_raw[col_price].astype(str).str.strip()
+        # รองรับ 1,234.50 หรือ 1234.50 และตัด ฿ ออก
         is_numeric = raw_price.str.fullmatch(r"[+-]?\d+(?:[.,]\d+)?")
         base_baht = pd.to_numeric(
             raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False),
@@ -195,7 +203,7 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
         base_baht = pd.Series([None]*len(df_raw), index=df_raw.index, dtype="float")
     out["UNITPRICE"] = base_baht
 
-    # โปรข้อความคงที่
+    # --- โปรข้อความคงที่ (ถ้ามี ลบ/override ราคา) ---
     thai_to_arabic = str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789")
     row_texts = df_raw.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(thai_to_arabic).lower(), axis=1)
     promo_rules = [
@@ -208,14 +216,18 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
         override.loc[row_texts.str.contains(pattern, regex=True, na=False)] = baht
     out.loc[override.notna(), "UNITPRICE"] = override[override.notna()].astype(float)
 
+    # --- ค่า default อื่น ๆ ---
     out["ITEMPARMCODE"] = "000001"
     out["UNITWEIGHT"]   = 0
     out["TAXCODE_1"]    = "01"
 
     for c in ["ITEMCODE","ITEMNAME","SCANCODE1","ITEMPARMCODE","TAXCODE_1"]:
         out[c] = out[c].astype("string").fillna("").astype(str).str.strip()
+
+    # แปลงบาท -> สตางค์ (int)
     out["UNITPRICE"] = out["UNITPRICE"].fillna(0).apply(to_satang)
 
+    # ตัดแถวว่าง (ทั้ง ITEMCODE และ ITEMNAME ว่าง)
     out = out[~((out["ITEMCODE"] == "") & (out["ITEMNAME"] == ""))].reset_index(drop=True)
     return out
 
