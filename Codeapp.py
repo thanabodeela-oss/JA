@@ -38,16 +38,13 @@ CANDIDATE_HEADERS = {
     "PRICE", "UNIT PRICE", "RETAIL PRICE", "ราคาต่อหน่วย",
     "ราคาต่อชิ้น"
 }
-
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
 
 NON_ITEM_KEYWORDS = (
     "รวม", "ยอดสุทธิ", "เงินสด", "ทอน", "บัตร", "รับชำระ", "ชำระ",
     "ส่วนลด", "คูปอง", "VAT", "ภาษี", "หัวบิล", "ท้ายบิล", "ยกเลิก", "VOID"
 )
-DISCOUNT_KEYWORDS = (
-    "ส่วนลด", "คูปอง", "Coupon", "DISCOUNT", "โปร", "Promotion", "โปรฯ"
-)
+DISCOUNT_KEYWORDS = ("ส่วนลด", "คูปอง", "Coupon", "DISCOUNT", "โปร", "Promotion", "โปรฯ")
 
 PAT_LINE_ITEM = re.compile(r"^\s*(?P<qty>\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
 PAT_DISCOUNT  = re.compile(r"^\s*(?:(?P<qty>\d+)\s+)?(?P<name>.+?)\s+(?P<amt>-?\(?[\d\.,]+\)?)\s*$")
@@ -115,36 +112,28 @@ def read_excel_smart(file_obj, manual_sheet: str | None = None) -> tuple[pd.Data
     excel_file = pd.ExcelFile(BytesIO(data))
     target_sheets = [manual_sheet] if manual_sheet else excel_file.sheet_names
 
-    best_sheet = None
-    best_row   = 0
-    best_score = -1
+    best_sheet, best_row, best_score = None, 0, -1
     candidate_set = {canonicalize_text(h) for h in CANDIDATE_HEADERS}
 
     for sheet_name in target_sheets:
         df_probe = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=None, dtype=str)
         limit = min(20, len(df_probe))
-        local_best_row = 0
-        local_best_score = -1
+        local_best_row, local_best_score = 0, -1
 
         for i in range(limit):
             row = [str(x) if pd.notna(x) else "" for x in df_probe.iloc[i].tolist()]
             score = sum(1 for v in row if canonicalize_text(v) in candidate_set)
-            if any("ราคา" in str(v) for v in row):
-                score += 2
+            if any("ราคา" in str(v) for v in row): score += 2
             non_empty_cols = sum(1 for v in row if str(v).strip() != "")
             score += min(non_empty_cols, 3) * 0.1
             if score > local_best_score:
-                local_best_score = score
-                local_best_row = i
+                local_best_score, local_best_row = score, i
 
         if local_best_score > best_score:
-            best_score = local_best_score
-            best_sheet = sheet_name
-            best_row   = local_best_row
+            best_sheet, best_row, best_score = sheet_name, local_best_row, local_best_score
 
     if best_sheet is None:
-        best_sheet = target_sheets[0]
-        best_row = 0
+        best_sheet, best_row = target_sheets[0], 0
 
     df = pd.read_excel(BytesIO(data), sheet_name=best_sheet, header=best_row, dtype=str)
     return df, best_sheet, best_row
@@ -177,23 +166,14 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     if col_price_piece:
         raw_price = df_raw[col_price_piece].astype(str).str.strip()
-        base_baht = pd.to_numeric(
-            raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False),
-            errors="coerce"
-        )
+        base_baht = pd.to_numeric(raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False), errors="coerce")
     elif col_price_fallback:
         raw_price = df_raw[col_price_fallback].astype(str).str.strip()
         is_numeric = raw_price.str.fullmatch(r"[+-]?\d+(?:[.,]\d+)?")
-        base_baht = pd.to_numeric(
-            raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False),
-            errors="coerce"
-        ).where(is_numeric)
+        base_baht = pd.to_numeric(raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False), errors="coerce").where(is_numeric)
 
         thai_to_arabic = str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789")
-        row_texts = df_raw.apply(
-            lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(thai_to_arabic).lower(),
-            axis=1
-        )
+        row_texts = df_raw.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(thai_to_arabic).lower(), axis=1)
         promo_rules = [
             (re.compile(r"3\s*ชิ้น\s*100"), 50.0),
             (re.compile(r"4\s*ชิ้น\s*100"), 35.0),
@@ -268,11 +248,9 @@ def extract_number_from_text(text: str) -> float:
     except Exception:
         return 0.0
 
-# ---- NEW: helpers สำหรับทำความสะอาดวัน–เวลา และสร้างป้ายรวม ----
+# ---- helpers วัน–เวลา ----
 def clean_time_token(tok: str | None) -> str:
-    """คืนรูปแบบเวลาเป็น HH:MM หรือ HH:MM:SS จาก '0908', '091216', '10:56' ฯลฯ"""
-    if not tok:
-        return ""
+    if not tok: return ""
     s = re.sub(r"\D", "", str(tok).strip())
     if len(s) == 4:   # HHMM
         return f"{s[:2]}:{s[2:]}"
@@ -281,11 +259,9 @@ def clean_time_token(tok: str | None) -> str:
     return str(tok).strip()
 
 def clean_date_token(tok: str | None) -> str:
-    """คืนรูปแบบวันเป็น YYYY-MM-DD จาก '20251031' หรือ '31/10/2025'"""
-    if not tok:
-        return ""
+    if not tok: return ""
     s = str(tok).strip()
-    if re.fullmatch(r"\d{8}", s):           # YYYYMMDD
+    if re.fullmatch(r"\d{8}", s):  # YYYYMMDD
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
     m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)  # DD/MM/YYYY
     if m:
@@ -294,28 +270,23 @@ def clean_date_token(tok: str | None) -> str:
     return s
 
 def format_datetime_label(d: str, t: str) -> str:
-    """คืนข้อความ 'YYYY-MM-DD HH:MM' โดยตัด HH:MM จากเวลา"""
     t = clean_time_token(t or "")
     hhmm = t[:5] if ":" in t else (t[:2] + ":" + t[2:4] if len(t) >= 4 else t)
     return (d or "").strip() + (" " + hhmm if hhmm else "")
 
 def parse_ej_text(text: str):
-    """Parse EJ text and return (receipts, items, discounts) พร้อมวันที่/เวลา/เลขบิล"""
+    """Return (receipts, items, discounts) with date/time/invoice attached."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     receipts, items, discounts = [], [], []
 
     blocks = re.split(r"\n(?=S\n)", "\n" + text)
     for block in blocks:
-        if not block.strip().startsWith("S\n") if hasattr(str, "startsWith") else not block.strip().startswith("S\n"):
+        if not block.strip().startswith("S\n"):
             continue
 
-        mode = None
-        price_total = None
-        canceled = False
+        mode, price_total, canceled = None, None, False
         body_lines = []
-        inv_date_raw = None
-        inv_time_raw = None
-        inv_no       = None
+        inv_date_raw = inv_time_raw = inv_no = None
 
         for raw_line in block.splitlines():
             if raw_line.startswith("HINVOICEDATE="):
@@ -330,11 +301,11 @@ def parse_ej_text(text: str):
                 price_total = raw_line.split("=", 1)[1].strip()
             elif raw_line.startswith("B"):
                 text_line = raw_line[1:].strip()
-                if any(keyword in text_line for keyword in ("ยกเลิก","VOID","Cancel","CANCEL")):
+                if any(k in text_line for k in ("ยกเลิก","VOID","Cancel","CANCEL")):
                     canceled = True
                 body_lines.append(text_line)
 
-        if mode not in (None, "REG", "REG "):
+        if mode not in (None, "REG", "REG "):  # รับเฉพาะโหมดขาย
             continue
         if canceled:
             continue
@@ -343,7 +314,7 @@ def parse_ej_text(text: str):
         inv_time = clean_time_token(inv_time_raw) if inv_time_raw else ""
 
         for text_line in body_lines:
-            if any(keyword in text_line for keyword in DISCOUNT_KEYWORDS):
+            if any(k in text_line for k in DISCOUNT_KEYWORDS):
                 m2 = PAT_DISCOUNT.match(text_line)
                 if m2:
                     qty_txt = m2.group("qty")
@@ -352,34 +323,39 @@ def parse_ej_text(text: str):
                     amount_text = m2.group("amt").strip()
                     if amount_text.startswith("(") and amount_text.endswith(")"):
                         amount_text = "-" + amount_text[1:-1]
-                    discount_amount = extract_number_from_text(amount_text)
                     discounts.append({
-                        "discount": discount_name, "amount": discount_amount, "times": times,
-                        "date": inv_date, "time": inv_time, "invoice": inv_no
+                        "discount": discount_name,
+                        "amount": extract_number_from_text(amount_text),
+                        "times": times,
+                        "date": inv_date,
+                        "time": inv_time,
+                        "invoice": inv_no,
                     })
                 continue
 
-            if any(keyword in text_line for keyword in NON_ITEM_KEYWORDS):
+            if any(k in text_line for k in NON_ITEM_KEYWORDS):
                 continue
 
             m = PAT_LINE_ITEM.match(text_line)
-            if not m:
-                continue
-            item_name = m.group("name").strip()
-            quantity = int(m.group("qty"))
+            if not m: continue
             amount_text = m.group("amt").strip()
             if amount_text.startswith("(") and amount_text.endswith(")"):
                 amount_text = "-" + amount_text[1:-1]
-            amount = extract_number_from_text(amount_text)
             items.append({
-                "name": item_name, "qty": quantity, "amount": amount,
-                "date": inv_date, "time": inv_time, "invoice": inv_no
+                "name": m.group("name").strip(),
+                "qty": int(m.group("qty")),
+                "amount": extract_number_from_text(amount_text),
+                "date": inv_date,
+                "time": inv_time,
+                "invoice": inv_no,
             })
 
         if price_total and price_total.strip():
             receipts.append({
                 "amount": extract_number_from_text(price_total),
-                "date": inv_date, "time": inv_time, "invoice": inv_no
+                "date": inv_date,
+                "time": inv_time,
+                "invoice": inv_no,
             })
 
     return pd.DataFrame(receipts), pd.DataFrame(items), pd.DataFrame(discounts)
@@ -425,8 +401,7 @@ with tab_product:
 
             if str(getattr(uploaded_file, "name", "")).lower().endswith(".csv"):
                 df_raw = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False)
-                chosen_sheet = "CSV"
-                header_row = 0
+                chosen_sheet, header_row = "CSV", 0
             else:
                 df_raw, chosen_sheet, header_row = read_excel_smart(uploaded_file, manual_sheet=manual_sheet)
 
@@ -504,65 +479,65 @@ with tab_sales:
         c2.metric("จำนวนชิ้น (รวม)", f"{total_qty:,}")
         c3.metric("ยอดขายรวม", f"{total_amount:,.2f}")
 
-        # ---------- ตารางบิล (เพิ่มคอลัมน์ 'วันที่-เวลา') ----------
+        # ---------- เตรียมตารางเพื่อ "ใช้งาน" ภายใน (ยังคงเก็บวัน/เวลาไว้สรุป) ----------
         if not df_receipts.empty:
             df_receipts_pretty = (
                 df_receipts.copy()
-                .assign(
-                    วันที่=lambda d: d["date"].fillna(""),
-                    เวลา=lambda d: d["time"].fillna(""),
-                    บิล=lambda d: d["invoice"].fillna("")
-                )
-                .assign(**{"วันที่-เวลา": lambda d: d.apply(lambda r: format_datetime_label(r["วันที่"], r["เวลา"]), axis=1)})
+                .assign(วันที่=lambda d: d["date"].fillna(""),
+                        เวลา=lambda d: d["time"].fillna(""),
+                        บิล=lambda d: d["invoice"].fillna(""))
                 .rename(columns={"amount": "ยอดเงิน"})
-                [["บิล","วันที่","เวลา","วันที่-เวลา","ยอดเงิน"]]
+                [["บิล","วันที่","เวลา","ยอดเงิน"]]
                 .sort_values(["วันที่","เวลา","บิล"])
             )
         else:
             if not df_items.empty:
-                def _fix_time(s):
-                    return clean_time_token(s) if isinstance(s, str) else s
+                def _fix_time(s): return clean_time_token(s) if isinstance(s, str) else s
                 df_receipts_pretty = (
                     df_items.groupby(["date","time","invoice"], as_index=False)["amount"].sum()
-                    .assign(
-                        วันที่=lambda d: d["date"].fillna(""),
-                        เวลา=lambda d: d["time"].apply(_fix_time),
-                        บิล=lambda d: d["invoice"].fillna("")
-                    )
-                    .assign(**{"วันที่-เวลา": lambda d: d.apply(lambda r: format_datetime_label(r["วันที่"], r["เวลา"]), axis=1)})
+                    .assign(วันที่=lambda d: d["date"].fillna(""),
+                            เวลา=lambda d: d["time"].apply(_fix_time),
+                            บิล=lambda d: d["invoice"].fillna(""))
                     .rename(columns={"amount": "ยอดเงิน"})
-                    [["บิล","วันที่","เวลา","วันที่-เวลา","ยอดเงิน"]]
+                    [["บิล","วันที่","เวลา","ยอดเงิน"]]
                     .sort_values(["วันที่","เวลา","บิล"])
                 )
             else:
-                df_receipts_pretty = pd.DataFrame(columns=["บิล","วันที่","เวลา","วันที่-เวลา","ยอดเงิน"])
+                df_receipts_pretty = pd.DataFrame(columns=["บิล","วันที่","เวลา","ยอดเงิน"])
+
+        # ---------- ตาราง "แสดงผล" เฉพาะ บิล | วันที่-เวลา | ยอดเงิน ----------
+        if df_receipts_pretty.empty:
+            df_receipts_display = pd.DataFrame(columns=["บิล","วันที่-เวลา","ยอดเงิน"])
+        else:
+            df_receipts_display = (
+                df_receipts_pretty
+                .assign(**{"วันที่-เวลา": lambda d: d.apply(lambda r: format_datetime_label(r["วันที่"], r["เวลา"]), axis=1)})
+                [["บิล","วันที่-เวลา","ยอดเงิน"]]
+                .sort_values(["วันที่-เวลา","บิล"])
+                .reset_index(drop=True)
+            )
 
         with st.expander("🧾 ดูบิลทั้งหมด (มีวัน–เวลา)", expanded=False):
-            st.dataframe(df_receipts_pretty[["บิล","วันที่-เวลา","ยอดเงิน"]], use_container_width=True, hide_index=True)
+            st.dataframe(df_receipts_display, use_container_width=True, hide_index=True)
 
-        # ---------- สรุปตามสินค้า (เดิม) ----------
+        # ---------- สรุปตามสินค้า ----------
         st.markdown("#### 📦 สรุปยอดตามสินค้า")
         df_summary = summarize_items(df_items)
         st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
-        # ---------- ส่วนลด (เดิม) ----------
+        # ---------- ส่วนลด ----------
         st.markdown("#### 🧾 ส่วนลด/คูปองที่ใช้")
         if df_discounts.empty:
             st.info("ไม่มีการใช้ส่วนลดในไฟล์ที่อัปโหลด")
         else:
             df_discount_summary = (
-                df_discounts
-                .groupby("discount", as_index=False)
-                .agg({"times": "sum", "amount": "sum"})
-            )
-            df_discount_summary = (
-                df_discount_summary
+                df_discounts.groupby("discount", as_index=False).agg({"times": "sum", "amount": "sum"})
                 .rename(columns={"discount": "ส่วนลด", "times": "จำนวนครั้ง", "amount": "มูลค่ารวมลด"})
                 .sort_values(["จำนวนครั้ง", "มูลค่ารวมลด"], ascending=[False, True])
             )
             st.dataframe(df_discount_summary, use_container_width=True, hide_index=True)
 
-        # ---------- Export เดิม ----------
+        # ---------- Export ----------
         c1, c2 = st.columns(2)
         with c1:
             st.download_button("⬇️ Export CSV — สรุปตามสินค้า", export_csv_to_bytes(df_summary), file_name="EJ_items_summary.csv", mime="text/csv", use_container_width=True)
@@ -576,11 +551,10 @@ with tab_sales:
             with c4:
                 st.download_button("⬇️ Export Excel — ส่วนลด/คูปอง", export_excel_to_bytes(df_discount_summary, sheet_name="ส่วนลด"), file_name="EJ_discounts_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-        # ---------- สรุปยอดตาม 'วัน' ----------
+        # ---------- สรุปตามวัน ----------
         if not df_receipts_pretty.empty:
             df_by_date = (
-                df_receipts_pretty
-                .groupby("วันที่", as_index=False)
+                df_receipts_pretty.groupby("วันที่", as_index=False)
                 .agg(จำนวนบิล=("บิล","nunique"), ยอดขายรวม=("ยอดเงิน","sum"))
                 .sort_values("วันที่")
             )
@@ -593,7 +567,7 @@ with tab_sales:
             with cB:
                 st.download_button("⬇️ Export Excel — สรุปตามวัน", export_excel_to_bytes(df_by_date, sheet_name="สรุปตามวัน"), file_name="EJ_summary_by_date.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-        # ---------- สรุปยอดตาม 'ชั่วโมง' ----------
+        # ---------- สรุปตามชั่วโมง ----------
         def _pick_hour(s):
             s = (s or "").strip()
             return s.split(":")[0] if ":" in s else (s[:2] if len(s) >= 2 else "")
