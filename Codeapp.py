@@ -40,9 +40,11 @@ CANDIDATE_HEADERS = {
 }
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
 
+# ✨ เพิ่มคำที่ต้อง “ข้าม” ไม่ถือเป็นรายการสินค้า (กันเคส 1 No, 1 คน, Qty change)
 NON_ITEM_KEYWORDS = (
     "รวม", "ยอดสุทธิ", "เงินสด", "ทอน", "บัตร", "รับชำระ", "ชำระ",
-    "ส่วนลด", "คูปอง", "VAT", "ภาษี", "หัวบิล", "ท้ายบิล", "ยกเลิก", "VOID"
+    "ส่วนลด", "คูปอง", "VAT", "ภาษี", "หัวบิล", "ท้ายบิล", "ยกเลิก", "VOID",
+    "Qty change", "คน", " No"
 )
 DISCOUNT_KEYWORDS = ("ส่วนลด", "คูปอง", "Coupon", "DISCOUNT", "โปร", "Promotion", "โปรฯ")
 
@@ -179,7 +181,6 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
         raw_price = df_raw[col_price_fallback].astype(str).str.strip()
         is_numeric = raw_price.str.fullmatch(r"[+-]?\d+(?:[.,]\d+)?")
         base_baht = pd.to_numeric(raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False), errors="coerce").where(is_numeric)
-
         thai_to_arabic = str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789")
         row_texts = df_raw.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(thai_to_arabic).lower(), axis=1)
         promo_rules = [
@@ -281,12 +282,13 @@ def format_datetime_label(d: str, t: str) -> str:
     hhmm = t[:5] if ":" in t else (t[:2] + ":" + t[2:4] if len(t) >= 4 else t)
     return (d or "").strip() + (" " + hhmm if hhmm else "")
 
+# ✅ เกณฑ์ตรวจว่าบรรทัด "ราคา" สมเหตุผล (กันเลข 1/2/3 ฯลฯ)
+def _is_plausible_price(raw: str) -> bool:
+    v = abs(extract_number_from_text(raw))
+    return (v >= 5) or ("." in raw) or ("(" in raw and ")" in raw)
+
 def parse_ej_text(text: str):
-    """Parse EJ and return (receipts, items, discounts) with invoice/date/time.
-    - รองรับหัวบิลจาก HINVOICE* หรือบรรทัด B<date> <time> <inv>
-    - ถ้าไม่มี HPRICE จะใช้ผลรวมรายการเป็นยอดบิล
-    - รองรับรายการแบบ 2 บรรทัด และจำนวนติดลบ (Void/Qty change)
-    """
+    """Parse EJ and return (receipts, items, discounts) with invoice/date/time."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     receipts, items, discounts = [], [], []
 
@@ -382,8 +384,8 @@ def parse_ej_text(text: str):
                     amt_f = extract_number_from_text(amount_text)
                     items.append({
                         "name": item_name,
-                        "qty": qty_val,            # อาจติดลบ
-                        "amount": amt_f,           # อาจติดลบ
+                        "qty": qty_val,
+                        "amount": amt_f,
                         "date": inv_date,
                         "time": inv_time,
                         "invoice": inv_no,
@@ -392,12 +394,15 @@ def parse_ej_text(text: str):
                 i += 1
                 continue
 
-            # สินค้าแบบ 2 บรรทัด (จำนวน+ชื่อ) + (ราคา)
+            # สินค้าแบบ 2 บรรทัด (จำนวน+ชื่อ) + (ราคา) — ตรวจความสมเหตุผลของราคา และห้ามใช้บรรทัด NON_ITEM เป็นราคา
             m_head = PAT_QTY_NAME_ONLY.match(text_line)
             if m_head and (i + 1) < len(body_lines):
                 next_line = body_lines[i + 1]
+                if any(k in next_line for k in NON_ITEM_KEYWORDS):
+                    i += 1
+                    continue
                 m_amt = PAT_AMOUNT_ONLY.match(next_line)
-                if m_amt:
+                if m_amt and _is_plausible_price(m_amt.group("amt")):
                     item_name = m_head.group("name").strip()
                     amount_text = m_amt.group("amt").strip()
                     if amount_text.startswith("(") and amount_text.endswith(")"):
@@ -411,8 +416,8 @@ def parse_ej_text(text: str):
                         amt_f = extract_number_from_text(amount_text)
                         items.append({
                             "name": item_name,
-                            "qty": qty_val,        # อาจติดลบ
-                            "amount": amt_f,       # อาจติดลบ
+                            "qty": qty_val,
+                            "amount": amt_f,
                             "date": inv_date,
                             "time": inv_time,
                             "invoice": inv_no,
@@ -668,9 +673,8 @@ with tab_sales:
                     lambda r: (r["hprice_amount"] if pd.notna(r["hprice_amount"]) else (float(r["items_amount"]) + float(r["discount_amount"]))),
                     axis=1
                 )
-            )[
-                ["Invoice","Date","Time","สินค้า","ส่วนลด","Amount"]
-            ].rename(columns={"Amount":"ยอดเงิน"})
+            )[["Invoice","Date","Time","สินค้า","ส่วนลด","Amount"]]
+            .rename(columns={"Amount":"ยอดเงิน"})
             .sort_values(["Date","Time","Invoice"])
         )
 
