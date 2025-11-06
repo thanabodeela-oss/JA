@@ -40,11 +40,10 @@ CANDIDATE_HEADERS = {
 }
 EJ_ENCODINGS = ["utf-8-sig", "utf-8", "cp874", "tis-620", "utf-16le"]
 
-# ✨ เพิ่มคำที่ต้อง “ข้าม” ไม่ถือเป็นรายการสินค้า (กันเคส 1 No, 1 คน, Qty change)
 NON_ITEM_KEYWORDS = (
     "รวม", "ยอดสุทธิ", "เงินสด", "ทอน", "บัตร", "รับชำระ", "ชำระ",
     "ส่วนลด", "คูปอง", "VAT", "ภาษี", "หัวบิล", "ท้ายบิล", "ยกเลิก", "VOID",
-    "Qty change", "คน", " No"
+    "No", "คน", "Qty change"  # กันบรรทัดหลอก
 )
 DISCOUNT_KEYWORDS = ("ส่วนลด", "คูปอง", "Coupon", "DISCOUNT", "โปร", "Promotion", "โปรฯ")
 
@@ -181,6 +180,7 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
         raw_price = df_raw[col_price_fallback].astype(str).str.strip()
         is_numeric = raw_price.str.fullmatch(r"[+-]?\d+(?:[.,]\d+)?")
         base_baht = pd.to_numeric(raw_price.str.replace(",", "", regex=False).str.replace("฿", "", regex=False), errors="coerce").where(is_numeric)
+
         thai_to_arabic = str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789")
         row_texts = df_raw.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]).translate(thai_to_arabic).lower(), axis=1)
         promo_rules = [
@@ -282,7 +282,7 @@ def format_datetime_label(d: str, t: str) -> str:
     hhmm = t[:5] if ":" in t else (t[:2] + ":" + t[2:4] if len(t) >= 4 else t)
     return (d or "").strip() + (" " + hhmm if hhmm else "")
 
-# ✅ เกณฑ์ตรวจว่าบรรทัด "ราคา" สมเหตุผล (กันเลข 1/2/3 ฯลฯ)
+# ✅ เกณฑ์ว่าราคา “สมเหตุผล” กันเลข 01/02/03 ฯลฯ ที่เป็นส่วนหนึ่งของชื่อ
 def _is_plausible_price(raw: str) -> bool:
     v = abs(extract_number_from_text(raw))
     return (v >= 5) or ("." in raw) or ("(" in raw and ")" in raw)
@@ -304,7 +304,7 @@ def parse_ej_text(text: str):
         mode, price_total, canceled = None, None, False
         body_lines = []
         inv_date_raw = inv_time_raw = inv_no = None
-        block_items_total = 0.0  # fallback
+        block_items_total = 0.0
 
         for raw_line in block.splitlines():
             if raw_line.startswith("HINVOICEDATE="):
@@ -337,7 +337,6 @@ def parse_ej_text(text: str):
         inv_date = clean_date_token(inv_date_raw) if inv_date_raw else ""
         inv_time = clean_time_token(inv_time_raw) if inv_time_raw else ""
 
-        # ---------- parse body ----------
         i = 0
         while i < len(body_lines):
             text_line = body_lines[i]
@@ -363,16 +362,67 @@ def parse_ej_text(text: str):
                 i += 1
                 continue
 
-            # ข้ามบรรทัดสรุป/การชำระ
+            # ข้ามสรุป/การชำระ/บรรทัดไม่ใช่สินค้า
             if any(k in text_line for k in NON_ITEM_KEYWORDS):
                 i += 1
                 continue
 
-            # สินค้าแบบ 1 บรรทัด
+            handled = False
+
+            # ---- ลองแบบ 2 บรรทัดก่อน (จำนวน+ชื่อ → ราคา) ----
+            m_head = PAT_QTY_NAME_ONLY.match(text_line)
+            if m_head and (i + 1) < len(body_lines):
+                next_line = body_lines[i + 1]
+                if not any(k in next_line for k in NON_ITEM_KEYWORDS):
+                    m_amt = PAT_AMOUNT_ONLY.match(next_line)
+                    if m_amt and _is_plausible_price(m_amt.group("amt")):
+                        item_name = m_head.group("name").strip()
+                        amount_text = m_amt.group("amt").strip()
+                        if amount_text.startswith("(") and amount_text.endswith(")"):
+                            amount_text = "-" + amount_text[1:-1]
+
+                        name_compact = (item_name.translate(str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789"))
+                                                   .replace(",", "").replace(".", "").replace(" ", "")
+                                                   .replace("฿","").replace("-",""))
+                        if not (name_compact.isdigit() or item_name in {".","","-"}):
+                            qty_val = int(m_head.group("qty"))
+                            amt_f = extract_number_from_text(amount_text)
+                            items.append({
+                                "name": item_name,
+                                "qty": qty_val,
+                                "amount": amt_f,
+                                "date": inv_date,
+                                "time": inv_time,
+                                "invoice": inv_no,
+                            })
+                            block_items_total += amt_f
+                            i += 2
+                            handled = True
+
+            if handled:
+                continue
+
+            # ---- ลองแบบ 1 บรรทัด (พร้อมตรวจ fallback ไปบรรทัดถัดไปถ้าราคาแปลก) ----
             m = PAT_LINE_ITEM.match(text_line)
             if m:
                 item_name = m.group("name").strip()
                 amount_text = m.group("amt").strip()
+
+                # ถ้าราคาไม่สมเหตุผล (เช่น 02) → ลองใช้บรรทัดถัดไปเป็นราคา
+                if not _is_plausible_price(amount_text) and (i + 1) < len(body_lines):
+                    next_line = body_lines[i + 1]
+                    if not any(k in next_line for k in NON_ITEM_KEYWORDS):
+                        m_amt = PAT_AMOUNT_ONLY.match(next_line)
+                        if m_amt and _is_plausible_price(m_amt.group("amt")):
+                            amount_text = m_amt.group("amt").strip()
+                            i_advance = 2
+                        else:
+                            i_advance = 1
+                    else:
+                        i_advance = 1
+                else:
+                    i_advance = 1
+
                 if amount_text.startswith("(") and amount_text.endswith(")"):
                     amount_text = "-" + amount_text[1:-1]
 
@@ -381,38 +431,7 @@ def parse_ej_text(text: str):
                                            .replace("฿","").replace("-",""))
                 if not (name_compact.isdigit() or item_name in {".","","-"}):
                     qty_val = int(m.group("qty"))
-                    amt_f = extract_number_from_text(amount_text)
-                    items.append({
-                        "name": item_name,
-                        "qty": qty_val,
-                        "amount": amt_f,
-                        "date": inv_date,
-                        "time": inv_time,
-                        "invoice": inv_no,
-                    })
-                    block_items_total += amt_f
-                i += 1
-                continue
-
-            # สินค้าแบบ 2 บรรทัด (จำนวน+ชื่อ) + (ราคา) — ตรวจความสมเหตุผลของราคา และห้ามใช้บรรทัด NON_ITEM เป็นราคา
-            m_head = PAT_QTY_NAME_ONLY.match(text_line)
-            if m_head and (i + 1) < len(body_lines):
-                next_line = body_lines[i + 1]
-                if any(k in next_line for k in NON_ITEM_KEYWORDS):
-                    i += 1
-                    continue
-                m_amt = PAT_AMOUNT_ONLY.match(next_line)
-                if m_amt and _is_plausible_price(m_amt.group("amt")):
-                    item_name = m_head.group("name").strip()
-                    amount_text = m_amt.group("amt").strip()
-                    if amount_text.startswith("(") and amount_text.endswith(")"):
-                        amount_text = "-" + amount_text[1:-1]
-
-                    name_compact = (item_name.translate(str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789"))
-                                               .replace(",", "").replace(".", "").replace(" ", "")
-                                               .replace("฿","").replace("-",""))
-                    if not (name_compact.isdigit() or item_name in {".","","-"}):
-                        qty_val = int(m_head.group("qty"))
+                    if _is_plausible_price(amount_text):
                         amt_f = extract_number_from_text(amount_text)
                         items.append({
                             "name": item_name,
@@ -423,17 +442,14 @@ def parse_ej_text(text: str):
                             "invoice": inv_no,
                         })
                         block_items_total += amt_f
-                    i += 2
-                    continue
+
+                i += i_advance
+                continue
 
             i += 1
 
-        # ใบเสร็จ: ใช้ HPRICE ถ้ามี ไม่งั้นใช้ผลรวมรายการ
-        if price_total and price_total.strip():
-            amount_final = extract_number_from_text(price_total)
-        else:
-            amount_final = block_items_total
-
+        # รวมยอดบิล
+        amount_final = extract_number_from_text(price_total) if (price_total and price_total.strip()) else block_items_total
         if amount_final != 0 or inv_no or inv_date or inv_time:
             receipts.append({
                 "amount": amount_final,
@@ -673,8 +689,9 @@ with tab_sales:
                     lambda r: (r["hprice_amount"] if pd.notna(r["hprice_amount"]) else (float(r["items_amount"]) + float(r["discount_amount"]))),
                     axis=1
                 )
-            )[["Invoice","Date","Time","สินค้า","ส่วนลด","Amount"]]
-            .rename(columns={"Amount":"ยอดเงิน"})
+            )[
+                ["Invoice","Date","Time","สินค้า","ส่วนลด","Amount"]
+            ].rename(columns={"Amount":"ยอดเงิน"})
             .sort_values(["Date","Time","Invoice"])
         )
 
