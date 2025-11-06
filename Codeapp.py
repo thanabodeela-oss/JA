@@ -47,11 +47,13 @@ NON_ITEM_KEYWORDS = (
 )
 DISCOUNT_KEYWORDS = ("ส่วนลด", "คูปอง", "Coupon", "DISCOUNT", "โปร", "Promotion", "โปรฯ")
 
+# ---------- Regex ----------
 PAT_LINE_ITEM      = re.compile(r"^\s*(?P<qty>[+-]?\d+)\s+(?P<name>.+?)\s+(?P<amt>-?[\d\.,\(\)]+)\s*$")
 PAT_DISCOUNT       = re.compile(r"^\s*(?:(?P<qty>[+-]?\d+)\s+)?(?P<name>.+?)\s+(?P<amt>-?\(?[\d\.,]+\)?)\s*$")
 PAT_QTY_NAME_ONLY  = re.compile(r"^\s*(?P<qty>[+-]?\d+)\s+(?P<name>.+?)\s*$")
 PAT_AMOUNT_ONLY    = re.compile(r"^\s*(?P<amt>-?[\d\.,\(\)]+)\s*$")
 
+# ==================== UTILS ====================
 def canonicalize_text(text: str) -> str:
     return re.sub(r"[\s_\-\+\.\(\)\[\]\{\}/\\]+", "", text.strip().upper())
 
@@ -105,15 +107,19 @@ def export_excel_to_bytes(df: pd.DataFrame, sheet_name="สรุปตามส
 
 def export_excel_bills_bytes(df_bills_summary: pd.DataFrame,
                              df_bills_items: pd.DataFrame,
-                             df_bills_discounts: pd.DataFrame) -> bytes:
+                             df_bills_discounts: pd.DataFrame,
+                             df_manager: pd.DataFrame | None = None) -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         df_bills_summary.to_excel(writer, index=False, sheet_name="Bills")
         df_bills_items.to_excel(writer, index=False, sheet_name="Bill Items")
         df_bills_discounts.to_excel(writer, index=False, sheet_name="Bill Discounts")
+        if df_manager is not None and len(df_manager) > 0:
+            df_manager.to_excel(writer, index=False, sheet_name="Manager Adjustments")
     buffer.seek(0)
     return buffer.getvalue()
 
+# ==================== EXCEL READING ====================
 def read_excel_smart(file_obj, manual_sheet: str | None = None) -> tuple[pd.DataFrame, str, int]:
     data = file_obj.read()
     excel_file = pd.ExcelFile(BytesIO(data))
@@ -143,6 +149,7 @@ def read_excel_smart(file_obj, manual_sheet: str | None = None) -> tuple[pd.Data
     df = pd.read_excel(BytesIO(data), sheet_name=best_sheet, header=best_row, dtype=str)
     return df, best_sheet, best_row
 
+# ==================== NORMALIZE PRODUCT DF ====================
 def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     columns = list(df_raw.columns)
     column_map = {canonicalize_text(c): c for c in columns}
@@ -201,6 +208,7 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     out = out[~((out["ITEMCODE"] == "") & (out["ITEMNAME"] == ""))].reset_index(drop=True)
     return out
 
+# ==================== SQL GENERATION ====================
 def generate_row_sql_cia001(row: pd.Series, timestamp: str) -> str:
     raw_code = normalize_string(row.get("ITEMCODE", ""))
     itemcode = raw_code.zfill(12) if raw_code else ""
@@ -232,6 +240,7 @@ def build_sql_cia001(df: pd.DataFrame) -> str:
     lines.append("COMMIT;")
     return "\n".join(lines)
 
+# ==================== EJ PARSING ====================
 def read_text_with_encoding(data: bytes) -> str:
     for encoding in EJ_ENCODINGS:
         try:
@@ -251,18 +260,18 @@ def extract_number_from_text(text: str) -> float:
 def clean_time_token(tok: str | None) -> str:
     if not tok: return ""
     s = re.sub(r"\D", "", str(tok).strip())
-    if len(s) == 4:   # HHMM
+    if len(s) == 4:
         return f"{s[:2]}:{s[2:]}"
-    if len(s) == 6:   # HHMMSS
+    if len(s) == 6:
         return f"{s[:2]}:{s[2:4]}:{s[4:]}"
     return str(tok).strip()
 
 def clean_date_token(tok: str | None) -> str:
     if not tok: return ""
     s = str(tok).strip()
-    if re.fullmatch(r"\d{8}", s):  # YYYYMMDD
+    if re.fullmatch(r"\d{8}", s):
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
-    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)  # DD/MM/YYYY
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
     if m:
         dd, mm, yyyy = m.groups()
         return f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}"
@@ -278,9 +287,12 @@ def _is_plausible_price(raw: str) -> bool:
     return (v >= 5) or ("." in raw) or ("(" in raw and ")" in raw)
 
 def parse_ej_text(text: str):
-    """คืน (receipts, items, discounts) และจะใส่ใบผู้จัดการเป็นยอดติดลบผูกกับบิลต้นทาง"""
+    """Parse EJ -> (receipts_df, items_df, discounts_df, manager_df)
+       - ใส่บิลผู้จัดการเป็นรายการติดลบให้บิลต้นทาง
+       - เก็บตารางใบผู้จัดการแยกสำหรับออกรายงาน
+    """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    receipts, items, discounts = [], [], []
+    receipts, items, discounts, managers = [], [], [], []
 
     pat_b_header = re.compile(
         r"^\s*(?P<date>\d{1,2}/\d{1,2}/\d{4})\s+(?P<time>\d{1,2}:\d{2}(?::\d{2})?)\s+(?P<inv>\d{3,})\s*$"
@@ -299,11 +311,10 @@ def parse_ej_text(text: str):
         inv_date_raw = inv_time_raw = inv_no = None
         block_items_total = 0.0
 
-        # manager flags
         is_manager = False
         consec_link = None
         mgr_qty = None
-        mgr_amt = None
+        mgr_amt_text = None
 
         for raw_line in block.splitlines():
             if raw_line.startswith("HINVOICEDATE="):
@@ -329,7 +340,7 @@ def parse_ej_text(text: str):
                     except: pass
                 mamt = re_sum_amt.search(text_line)
                 if mamt:
-                    mgr_amt = mamt.group("amt").strip()
+                    mgr_amt_text = mamt.group("amt").strip()
 
                 if inv_no is None:
                     mhead = pat_b_header.match(text_line)
@@ -349,23 +360,35 @@ def parse_ej_text(text: str):
         inv_date = clean_date_token(inv_date_raw) if inv_date_raw else ""
         inv_time = clean_time_token(inv_time_raw) if inv_time_raw else ""
 
-        # ----- ใบผู้จัดการ: บันทึกยอดติดลบไปยังบิลที่ถูกผูก -----
-        if is_manager and consec_link and mgr_amt:
-            amt = extract_number_from_text(mgr_amt)
+        # ----- Manager slip -> push negative to linked invoice + record row for report
+        if is_manager and consec_link and mgr_amt_text:
+            amt = extract_number_from_text(mgr_amt_text)
             if amt != 0:
+                # สำหรับรายงานผู้จัดการ
+                managers.append({
+                    "ManagerInvoice": str(inv_no).zfill(6) if inv_no else "",
+                    "Date": inv_date,
+                    "Time": inv_time,
+                    "LinkedInvoice": str(consec_link).zfill(6),
+                    "Count": mgr_qty if mgr_qty is not None else 0,
+                    "Amount": amt,
+                    "ToInvoiceAmount": amt  # จำนวนเงินที่จะไปหักลบให้บิลต้นทาง
+                })
+                # สำหรับยอดขาย: หักลบให้บิลต้นทาง
                 receipts.append({
                     "amount": -abs(amt),
                     "date": inv_date,
                     "time": inv_time,
-                    "invoice": consec_link,    # ผูกไปบิลต้นทาง
+                    "invoice": consec_link,
                 })
-            continue
+            continue  # ไม่ parse รายการสินค้าในบิลผู้จัดการ
 
-        # ---------- parse body (บิลปกติ) ----------
+        # ---------- parse normal receipt body ----------
         i = 0
         while i < len(body_lines):
             text_line = body_lines[i]
 
+            # ส่วนลด
             if any(k in text_line for k in DISCOUNT_KEYWORDS):
                 m2 = PAT_DISCOUNT.match(text_line)
                 if m2:
@@ -386,11 +409,13 @@ def parse_ej_text(text: str):
                 i += 1
                 continue
 
+            # ข้ามบรรทัดสรุป/การชำระ
             if any(k in text_line for k in NON_ITEM_KEYWORDS):
                 i += 1
                 continue
 
             handled = False
+            # 2 บรรทัด (จำนวน+ชื่อ) + (ราคา)
             m_head = PAT_QTY_NAME_ONLY.match(text_line)
             if m_head and (i + 1) < len(body_lines):
                 next_line = body_lines[i + 1]
@@ -401,7 +426,6 @@ def parse_ej_text(text: str):
                         amount_text = m_amt.group("amt").strip()
                         if amount_text.startswith("(") and amount_text.endswith(")"):
                             amount_text = "-" + amount_text[1:-1]
-
                         name_compact = (item_name.translate(str.maketrans("๐๑๒๓๔๕๖๗๘๙","0123456789"))
                                                    .replace(",", "").replace(".", "").replace(" ", "")
                                                    .replace("฿","").replace("-",""))
@@ -422,11 +446,13 @@ def parse_ej_text(text: str):
             if handled:
                 continue
 
+            # 1 บรรทัด
             m = PAT_LINE_ITEM.match(text_line)
             if m:
                 item_name = m.group("name").strip()
                 amount_text = m.group("amt").strip()
 
+                # กันเคสราคาอยู่บรรทัดถัดไป
                 if not _is_plausible_price(amount_text) and (i + 1) < len(body_lines):
                     next_line = body_lines[i + 1]
                     if not any(k in next_line for k in NON_ITEM_KEYWORDS):
@@ -466,6 +492,7 @@ def parse_ej_text(text: str):
 
             i += 1
 
+        # รวมยอดบิล (ใช้ HPRICE ถ้ามี)
         amount_final = extract_number_from_text(price_total) if (price_total and price_total.strip()) else block_items_total
         if amount_final != 0 or inv_no or inv_date or inv_time:
             receipts.append({
@@ -475,7 +502,7 @@ def parse_ej_text(text: str):
                 "invoice": inv_no,
             })
 
-    return pd.DataFrame(receipts), pd.DataFrame(items), pd.DataFrame(discounts)
+    return pd.DataFrame(receipts), pd.DataFrame(items), pd.DataFrame(discounts), pd.DataFrame(managers)
 
 def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
     if df_items.empty:
@@ -487,17 +514,20 @@ def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["จำนวนชิ้น","ยอดเงิน"], ascending=[False, False])
     )
 
+# ==================== HEADER ====================
 st.markdown("<h2 style='text-align:center'>Casio V-R100 Tools</h2>", unsafe_allow_html=True)
 
+# ==================== SIDEBAR ====================
 with st.sidebar:
     st.markdown("### ⚙️ การตั้งค่า")
     vr100_encoding = st.selectbox("Encoding ไฟล์ SQL", ["UTF-8 (ปกติ)", "UTF-8 with BOM (UTF-8-SIG)"], index=1)
     st.caption("อัตโนมัติ: จับชีท + หัวตาราง + คอลัมน์เอง • ใช้เฉพาะ 'ราคาขาย' + โปรคงที่")
     st.caption("โปร: 3ชิ้น100→50฿, 4ชิ้น100→35฿, 50/2ชิ้น100→80฿ (ต่อชิ้น)")
 
+# ==================== TABS ====================
 tab_product, tab_sales = st.tabs(["🏷️ สินค้า (CIA001)", "📊 ยอดขาย (EJ)"])
 
-# ----- TAB PRODUCT (เหมือนเดิม) -----
+# ==================== TAB 1: PRODUCT ====================
 with tab_product:
     st.markdown("### อัปโหลด Excel/CSV หลายรายการ")
     st.caption("อัตโนมัติ: จับชีท + หัวตาราง + คอลัมน์เอง • ใช้เฉพาะ 'ราคาขาย' + โปรคงที่")
@@ -564,27 +594,29 @@ with tab_product:
             st.code(st.session_state.single_item_sql, language="sql")
         st.download_button("⬇️ ดาวน์โหลด SQL (รายการเดียว)", export_to_bytes(st.session_state.single_item_sql, vr100_encoding), file_name="CIA001_single_item.sql", mime="text/plain", use_container_width=True)
 
-# ----- TAB SALES (EJ) -----
+# ==================== TAB 2: SALES (EJ) ====================
 with tab_sales:
     st.markdown("### วิเคราะห์ยอดขายจากไฟล์ EJ")
     st.caption("อัปโหลด log_YYYYMMDD.txt จากเครื่อง V-R100 (อัปได้หลายไฟล์) — สรุปยอดขายตามบิลและตามสินค้า")
 
     ej_files = st.file_uploader("เลือกไฟล์ EJ (*.txt)", type=["txt"], accept_multiple_files=True, key="upload_ej_logs")
     if ej_files:
-        all_receipts, all_items, all_discounts = [], [], []
+        all_receipts, all_items, all_discounts, all_mgr = [], [], [], []
         with st.spinner("🔄 กำลังประมวลผลไฟล์..."):
             for file in ej_files:
                 text = read_text_with_encoding(file.read())
-                receipts, items, disc = parse_ej_text(text)
+                receipts, items, disc, mgr = parse_ej_text(text)
                 if not receipts.empty: all_receipts.append(receipts)
                 if not items.empty:    all_items.append(items)
                 if not disc.empty:     all_discounts.append(disc)
+                if not mgr.empty:      all_mgr.append(mgr)
 
         df_receipts_raw = pd.concat(all_receipts, ignore_index=True) if all_receipts else pd.DataFrame(columns=["amount","date","time","invoice"]).astype({"amount":"float"})
-        df_items    = pd.concat(all_items,    ignore_index=True) if all_items    else pd.DataFrame(columns=["name","qty","amount","date","time","invoice"])
-        df_discounts= pd.concat(all_discounts,ignore_index=True) if all_discounts else pd.DataFrame(columns=["discount","amount","times","date","time","invoice"])
+        df_items        = pd.concat(all_items,    ignore_index=True) if all_items    else pd.DataFrame(columns=["name","qty","amount","date","time","invoice"])
+        df_discounts    = pd.concat(all_discounts,ignore_index=True) if all_discounts else pd.DataFrame(columns=["discount","amount","times","date","time","invoice"])
+        df_manager      = pd.concat(all_mgr,      ignore_index=True) if all_mgr      else pd.DataFrame(columns=["ManagerInvoice","Date","Time","LinkedInvoice","Count","Amount","ToInvoiceAmount"])
 
-        # ✅ รวมยอดตามใบเสร็จ เพื่อให้ใบผู้จัดการ (ติดลบ) หักกับบิลต้นทาง
+        # ✅ สรุปรวมใบเสร็จต่อบิล (หักใบผู้จัดการแล้ว)
         df_receipts = (
             df_receipts_raw
             .groupby("invoice", as_index=False)
@@ -602,7 +634,7 @@ with tab_sales:
         c2.metric("จำนวนชิ้น (รวม)", f"{total_qty:,}")
         c3.metric("ยอดขายรวม", f"{total_amount:,.2f}")
 
-        # ตารางบิลสำหรับหน้า UI
+        # ---------- ตารางบิลสำหรับหน้า UI ----------
         df_receipts_pretty = (
             df_receipts.copy()
             .assign(วันที่=lambda d: d["date"].fillna(""),
@@ -623,12 +655,12 @@ with tab_sales:
         with st.expander("🧾 ดูบิลทั้งหมด (มีวัน–เวลา)", expanded=False):
             st.dataframe(df_receipts_display, use_container_width=True, hide_index=True)
 
-        # รายละเอียดสำหรับ Export
-        # (1) รวมข้อความสินค้า/ยอดสุทธิ ต่อบิล
+        # ---------- รายละเอียดตามบิลสำหรับ Export ----------
+        # (1) รวมสินค้าเป็นข้อความ (สุทธิ) และไม่ทำให้เวลาหาย
         if not df_items.empty:
             items_by_inv = (
                 df_items
-                .groupby(["invoice"], as_index=False)
+                .groupby(["invoice","date","time"], as_index=False)
                 .agg(items_qty=("qty","sum"), items_amount=("amount","sum"))
             )
             def _items_str(g):
@@ -636,50 +668,62 @@ with tab_sales:
                 parts = [f"{name} x{int(q)}" for name, q in sums.items() if int(q) != 0]
                 return ", ".join(parts)
             items_name_list = (
-                df_items.groupby(["invoice"]).apply(_items_str).reset_index(name="สินค้า")
+                df_items.groupby(["invoice","date","time"]).apply(_items_str).reset_index(name="สินค้า")
             )
-            items_by_inv = items_by_inv.merge(items_name_list, on=["invoice"], how="left")
+            items_by_inv = items_by_inv.merge(items_name_list, on=["invoice","date","time"], how="left")
         else:
-            items_by_inv = pd.DataFrame(columns=["invoice","items_qty","items_amount","สินค้า"])
+            items_by_inv = pd.DataFrame(columns=["invoice","date","time","items_qty","items_amount","สินค้า"])
 
-        # (2) รวมส่วนลดต่อบิล
+        # (2) รวมส่วนลดต่อบิล + string
         if not df_discounts.empty:
             disc_by_inv = (
                 df_discounts
-                .groupby(["invoice"], as_index=False)
+                .groupby(["invoice","date","time"], as_index=False)
                 .agg(discount_times=("times","sum"), discount_amount=("amount","sum"))
             )
             disc_list = (
-                df_discounts.groupby(["invoice"])
+                df_discounts.groupby(["invoice","date","time"])
                 .apply(lambda g: ", ".join(
                     f"{name} x{int(times)}"
                     for name, times in g.groupby("discount")["times"].sum().items()
                 ))
                 .reset_index(name="ส่วนลด")
             )
-            disc_by_inv = disc_by_inv.merge(disc_list, on=["invoice"], how="left")
+            disc_by_inv = disc_by_inv.merge(disc_list, on=["invoice","date","time"], how="left")
         else:
-            disc_by_inv = pd.DataFrame(columns=["invoice","discount_times","discount_amount","ส่วนลด"])
+            disc_by_inv = pd.DataFrame(columns=["invoice","date","time","discount_times","discount_amount","ส่วนลด"])
 
-        base = df_receipts.rename(columns={"invoice":"Invoice","date":"Date","time":"Time"})
-        base = (base.merge(items_by_inv.rename(columns={"invoice":"Invoice"}), on="Invoice", how="left")
-                    .merge(disc_by_inv.rename(columns={"invoice":"Invoice"}), on="Invoice", how="left")
-                    .fillna({"items_qty":0, "items_amount":0.0, "discount_times":0, "discount_amount":0.0, "สินค้า":"", "ส่วนลด":""}))
+        # (3) union keys
+        keys_parts = []
+        if not df_receipts.empty: keys_parts.append(df_receipts[["invoice","date","time"]])
+        if not items_by_inv.empty: keys_parts.append(items_by_inv[["invoice","date","time"]])
+        if not disc_by_inv.empty: keys_parts.append(disc_by_inv[["invoice","date","time"]])
+        base_keys = pd.concat(keys_parts, ignore_index=True).drop_duplicates() if keys_parts else pd.DataFrame(columns=["invoice","date","time"])
+
+        # attach
+        base = base_keys.merge(
+            df_receipts.rename(columns={"invoice":"Invoice","date":"Date","time":"Time"}),
+            left_on=["invoice","date","time"], right_on=["Invoice","Date","Time"], how="left"
+        ).merge(
+            items_by_inv, on=["invoice","date","time"], how="left"
+        ).merge(
+            disc_by_inv, on=["invoice","date","time"], how="left"
+        ).fillna({"items_qty":0,"items_amount":0.0,"discount_times":0,"discount_amount":0.0,"สินค้า":"","ส่วนลด":""})
 
         bills_summary = (
-            base.assign(Invoice=lambda d: d["Invoice"].astype(str).str.zfill(6))
+            base.assign(Invoice=lambda d: d["invoice"].astype(str).str.zfill(6))
                 [["Invoice","Date","Time","สินค้า","ส่วนลด","amount"]]
                 .rename(columns={"amount":"ยอดเงิน"})
                 .sort_values(["Date","Time","Invoice"])
         )
 
-        # ✅ Bill Items: ใส่ Date/Time จาก df_items (ไม่ปล่อยค่าว่าง)
+        # (4) Bill Items (คง Date/Time)
         bills_items = (
             df_items
             .assign(
                 Invoice=lambda d: d["invoice"].astype(str).str.zfill(6),
-                Date=lambda d: d["date"].astype(str),
-                Time=lambda d: d["time"].astype(str),
+                Date=lambda d: d["date"],
+                Time=lambda d: d["time"],
                 Item=lambda d: d["name"],
                 Qty=lambda d: d["qty"].astype(int),
                 Amount=lambda d: d["amount"].astype(float),
@@ -687,15 +731,15 @@ with tab_sales:
             .sort_values(["Date","Time","Invoice","Item"])
         )
 
-        # ✅ Bill Discounts: ใส่ Date/Time จาก df_discounts (ไม่ปล่อยค่าว่าง)
+        # (5) Bill Discounts (คง Date/Time)
         bills_discounts = (
             (df_discounts[["invoice","date","time","discount","times","amount"]]
              if not df_discounts.empty else
              pd.DataFrame(columns=["invoice","date","time","discount","times","amount"]))
             .assign(
                 Invoice=lambda d: d["invoice"].astype(str).str.zfill(6) if len(d)>0 else d["invoice"],
-                Date=lambda d: d["date"].astype(str) if len(d)>0 else d["date"],
-                Time=lambda d: d["time"].astype(str) if len(d)>0 else d["time"],
+                Date=lambda d: d["date"] if len(d)>0 else d["date"],
+                Time=lambda d: d["time"] if len(d)>0 else d["time"],
                 DiscountName=lambda d: d["discount"] if len(d)>0 else d["discount"],
                 Times=lambda d: d["times"].astype(int) if len(d)>0 else d["times"],
                 Amount=lambda d: d["amount"].astype(float) if len(d)>0 else d["amount"],
@@ -707,10 +751,22 @@ with tab_sales:
         else:
             bills_discounts = pd.DataFrame(columns=["Invoice","Date","Time","DiscountName","Times","Amount"])
 
+        # ---------- Manager Adjustments (ให้เห็นชัด 000066 / 000342) ----------
+        manager_view = pd.DataFrame(columns=["ManagerInvoice","Date","Time","LinkedInvoice","Count","Amount","ToInvoiceAmount"])
+        if not df_manager.empty:
+            manager_view = (
+                df_manager.assign(
+                    ManagerInvoice=lambda d: d["ManagerInvoice"].astype(str).str.zfill(6),
+                    LinkedInvoice=lambda d: d["LinkedInvoice"].astype(str).str.zfill(6)
+                )
+                .sort_values(["Date","Time","ManagerInvoice"])
+            )
+
+        # ---------- Export ----------
         st.markdown("#### ⬇️ ดาวน์โหลด Excel — รายละเอียดตามบิล (ทั้งวัน)")
-        excel_bytes = export_excel_bills_bytes(bills_summary, bills_items, bills_discounts)
+        excel_bytes = export_excel_bills_bytes(bills_summary, bills_items, bills_discounts, manager_view)
         st.download_button(
-            "📥 Export Excel — Bills / Bill Items / Bill Discounts",
+            "📥 Export Excel — Bills / Bill Items / Bill Discounts / Manager Adjustments",
             excel_bytes,
             file_name="EJ_bills_detail.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -720,10 +776,24 @@ with tab_sales:
         with st.expander("👀 ตัวอย่างชีท Bills (Top 20)", expanded=False):
             st.dataframe(bills_summary.head(20), use_container_width=True, hide_index=True)
 
+        with st.expander("🧯 บิลผู้จัดการ (สำหรับหักลบยอด)"):
+            if manager_view.empty:
+                st.info("ไม่พบบิลผู้จัดการ")
+            else:
+                # เน้นให้เห็นคู่ที่ถามมา
+                focus = manager_view[manager_view["ManagerInvoice"].isin(["000066","000342"])]
+                if not focus.empty:
+                    st.markdown("**รายการที่คุณถามหา (000066, 000342):**")
+                    st.dataframe(focus, use_container_width=True, hide_index=True)
+                st.markdown("**ทั้งหมด:**")
+                st.dataframe(manager_view, use_container_width=True, hide_index=True)
+
+        # ---------- สรุปตามสินค้า ----------
         st.markdown("#### 📦 สรุปยอดตามสินค้า")
         df_summary = summarize_items(df_items)
         st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
+        # ---------- ส่วนลดรวม ----------
         st.markdown("#### 🧾 ส่วนลด/คูปองที่ใช้")
         if df_discounts.empty:
             st.info("ไม่มีการใช้ส่วนลดในไฟล์ที่อัปโหลด")
@@ -735,11 +805,30 @@ with tab_sales:
             )
             st.dataframe(df_discount_summary, use_container_width=True, hide_index=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.download_button("⬇️ Export CSV — สรุปตามสินค้า", export_csv_to_bytes(df_summary), file_name="EJ_items_summary.csv", mime="text/csv", use_container_width=True)
-        with c2:
-            st.download_button("⬇️ Export Excel — สรุปตามสินค้า", export_excel_to_bytes(df_summary), file_name="EJ_items_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        # ---------- สรุปตามวัน ----------
+        if not df_receipts_pretty.empty:
+            df_by_date = (
+                df_receipts_pretty.groupby("วันที่", as_index=False)
+                .agg(จำนวนบิล=("บิล","nunique"), ยอดขายรวม=("ยอดเงิน","sum"))
+                .sort_values("วันที่")
+            )
+            st.markdown("#### 🗓️ สรุปยอดตามวัน")
+            st.dataframe(df_by_date, use_container_width=True, hide_index=True)
 
+        # ---------- สรุปตามชั่วโมง ----------
+        def _pick_hour(s):
+            s = (s or "").strip()
+            return s.split(":")[0] if ":" in s else (s[:2] if len(s) >= 2 else "")
+        if not df_receipts_pretty.empty:
+            df_by_hour = (
+                df_receipts_pretty.assign(ชั่วโมง=lambda d: d["เวลา"].apply(_pick_hour))
+                .groupby("ชั่วโมง", as_index=False)
+                .agg(จำนวนบิล=("บิล","nunique"), ยอดขายรวม=("ยอดเงิน","sum"))
+                .sort_values("ชั่วโมง")
+            )
+            st.markdown("#### ⏰ สรุปยอดตามชั่วโมง")
+            st.dataframe(df_by_hour, use_container_width=True, hide_index=True)
+
+# ==================== FOOTER ====================
 st.markdown("---")
 st.caption("💾 อย่าลืม Restart App หลังนำเข้า SQL • โปร: 3ชิ้น100→50฿, 4ชิ้น100→35฿, 50/2ชิ้น100→80฿ • ITEMPARMCODE=000001 • TAXCODE_1=01")
