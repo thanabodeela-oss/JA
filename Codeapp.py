@@ -349,17 +349,16 @@ def parse_ej_text(text: str):
         inv_date = clean_date_token(inv_date_raw) if inv_date_raw else ""
         inv_time = clean_time_token(inv_time_raw) if inv_time_raw else ""
 
-        # ----- ถ้าเป็นใบผู้จัดการ: บันทึกเป็นยอดติดลบไปยังบิลที่ถูกผูก แล้วจบบล็อก -----
+        # ----- ใบผู้จัดการ: บันทึกยอดติดลบไปยังบิลที่ถูกผูก -----
         if is_manager and consec_link and mgr_amt:
             amt = extract_number_from_text(mgr_amt)
             if amt != 0:
                 receipts.append({
                     "amount": -abs(amt),
-                    "date": inv_date,          # ใช้วันที่/เวลาของใบผู้จัดการ (ไม่มีของต้นฉบับในบล็อกนี้)
+                    "date": inv_date,
                     "time": inv_time,
-                    "invoice": consec_link,    # ผูกไปยังบิลต้นทาง
+                    "invoice": consec_link,    # ผูกไปบิลต้นทาง
                 })
-            # ไม่ parse รายการสินค้าภายในใบผู้จัดการ
             continue
 
         # ---------- parse body (บิลปกติ) ----------
@@ -585,7 +584,7 @@ with tab_sales:
         df_items    = pd.concat(all_items,    ignore_index=True) if all_items    else pd.DataFrame(columns=["name","qty","amount","date","time","invoice"])
         df_discounts= pd.concat(all_discounts,ignore_index=True) if all_discounts else pd.DataFrame(columns=["discount","amount","times","date","time","invoice"])
 
-        # ✅ ยุบยอดใบเสร็จตามเลขบิล เพื่อให้ใบผู้จัดการ (ติดลบ) หักกับบิลต้นฉบับ
+        # ✅ รวมยอดตามใบเสร็จ เพื่อให้ใบผู้จัดการ (ติดลบ) หักกับบิลต้นทาง
         df_receipts = (
             df_receipts_raw
             .groupby("invoice", as_index=False)
@@ -624,8 +623,8 @@ with tab_sales:
         with st.expander("🧾 ดูบิลทั้งหมด (มีวัน–เวลา)", expanded=False):
             st.dataframe(df_receipts_display, use_container_width=True, hide_index=True)
 
-        # รายละเอียดตามบิลสำหรับ Export
-        # (1) รวมรายการสินค้าเป็นข้อความ/ยอดสุทธิ
+        # รายละเอียดสำหรับ Export
+        # (1) รวมข้อความสินค้า/ยอดสุทธิ ต่อบิล
         if not df_items.empty:
             items_by_inv = (
                 df_items
@@ -674,27 +673,29 @@ with tab_sales:
                 .sort_values(["Date","Time","Invoice"])
         )
 
+        # ✅ Bill Items: ใส่ Date/Time จาก df_items (ไม่ปล่อยค่าว่าง)
         bills_items = (
             df_items
             .assign(
                 Invoice=lambda d: d["invoice"].astype(str).str.zfill(6),
-                Date="",
-                Time="",
+                Date=lambda d: d["date"].astype(str),
+                Time=lambda d: d["time"].astype(str),
                 Item=lambda d: d["name"],
                 Qty=lambda d: d["qty"].astype(int),
                 Amount=lambda d: d["amount"].astype(float),
             )[["Invoice","Date","Time","Item","Qty","Amount"]]
-            .sort_values(["Invoice","Item"])
+            .sort_values(["Date","Time","Invoice","Item"])
         )
 
+        # ✅ Bill Discounts: ใส่ Date/Time จาก df_discounts (ไม่ปล่อยค่าว่าง)
         bills_discounts = (
-            (df_discounts[["invoice","discount","times","amount"]]
+            (df_discounts[["invoice","date","time","discount","times","amount"]]
              if not df_discounts.empty else
-             pd.DataFrame(columns=["invoice","discount","times","amount"]))
+             pd.DataFrame(columns=["invoice","date","time","discount","times","amount"]))
             .assign(
                 Invoice=lambda d: d["invoice"].astype(str).str.zfill(6) if len(d)>0 else d["invoice"],
-                Date="",
-                Time="",
+                Date=lambda d: d["date"].astype(str) if len(d)>0 else d["date"],
+                Time=lambda d: d["time"].astype(str) if len(d)>0 else d["time"],
                 DiscountName=lambda d: d["discount"] if len(d)>0 else d["discount"],
                 Times=lambda d: d["times"].astype(int) if len(d)>0 else d["times"],
                 Amount=lambda d: d["amount"].astype(float) if len(d)>0 else d["amount"],
@@ -702,7 +703,7 @@ with tab_sales:
         )
         if not bills_discounts.empty:
             bills_discounts = bills_discounts[["Invoice","Date","Time","DiscountName","Times","Amount"]] \
-                                             .sort_values(["Invoice","DiscountName"])
+                                             .sort_values(["Date","Time","Invoice","DiscountName"])
         else:
             bills_discounts = pd.DataFrame(columns=["Invoice","Date","Time","DiscountName","Times","Amount"])
 
