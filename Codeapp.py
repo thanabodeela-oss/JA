@@ -105,15 +105,19 @@ def export_excel_to_bytes(df: pd.DataFrame, sheet_name="สรุปตามส
 
 def export_excel_bills_bytes(df_bills_summary: pd.DataFrame,
                              df_bills_items: pd.DataFrame,
-                             df_bills_discounts: pd.DataFrame) -> bytes:
+                             df_bills_discounts: pd.DataFrame,
+                             df_manager_adj: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         df_bills_summary.to_excel(writer, index=False, sheet_name="Bills")
         df_bills_items.to_excel(writer, index=False, sheet_name="Bill Items")
         df_bills_discounts.to_excel(writer, index=False, sheet_name="Bill Discounts")
+        # ชีทใหม่สำหรับใบผู้จัดการ
+        df_manager_adj.to_excel(writer, index=False, sheet_name="Manager Adjustments")
     buffer.seek(0)
     return buffer.getvalue()
 
+# ==================== EXCEL READING ====================
 def read_excel_smart(file_obj, manual_sheet: str | None = None) -> tuple[pd.DataFrame, str, int]:
     data = file_obj.read()
     excel_file = pd.ExcelFile(BytesIO(data))
@@ -143,6 +147,7 @@ def read_excel_smart(file_obj, manual_sheet: str | None = None) -> tuple[pd.Data
     df = pd.read_excel(BytesIO(data), sheet_name=best_sheet, header=best_row, dtype=str)
     return df, best_sheet, best_row
 
+# ==================== PRODUCT NORMALIZE (เดิม) ====================
 def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     columns = list(df_raw.columns)
     column_map = {canonicalize_text(c): c for c in columns}
@@ -201,6 +206,7 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     out = out[~((out["ITEMCODE"] == "") & (out["ITEMNAME"] == ""))].reset_index(drop=True)
     return out
 
+# ==================== SQL GENERATION (เดิม) ====================
 def generate_row_sql_cia001(row: pd.Series, timestamp: str) -> str:
     raw_code = normalize_string(row.get("ITEMCODE", ""))
     itemcode = raw_code.zfill(12) if raw_code else ""
@@ -232,6 +238,7 @@ def build_sql_cia001(df: pd.DataFrame) -> str:
     lines.append("COMMIT;")
     return "\n".join(lines)
 
+# ==================== EJ HELPERS ====================
 def read_text_with_encoding(data: bytes) -> str:
     for encoding in EJ_ENCODINGS:
         try:
@@ -251,18 +258,18 @@ def extract_number_from_text(text: str) -> float:
 def clean_time_token(tok: str | None) -> str:
     if not tok: return ""
     s = re.sub(r"\D", "", str(tok).strip())
-    if len(s) == 4:   # HHMM
+    if len(s) == 4:
         return f"{s[:2]}:{s[2:]}"
-    if len(s) == 6:   # HHMMSS
+    if len(s) == 6:
         return f"{s[:2]}:{s[2:4]}:{s[4:]}"
     return str(tok).strip()
 
 def clean_date_token(tok: str | None) -> str:
     if not tok: return ""
     s = str(tok).strip()
-    if re.fullmatch(r"\d{8}", s):  # YYYYMMDD
+    if re.fullmatch(r"\d{8}", s):
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
-    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)  # DD/MM/YYYY
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
     if m:
         dd, mm, yyyy = m.groups()
         return f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}"
@@ -277,10 +284,15 @@ def _is_plausible_price(raw: str) -> bool:
     v = abs(extract_number_from_text(raw))
     return (v >= 5) or ("." in raw) or ("(" in raw and ")" in raw)
 
+# ==================== EJ PARSER (เพิ่มเก็บ Manager) ====================
 def parse_ej_text(text: str):
-    """คืน (receipts, items, discounts) และจะใส่ใบผู้จัดการเป็นยอดติดลบผูกกับบิลต้นทาง"""
+    """
+    คืน (receipts, items, discounts, manager_adjustments)
+    - บล็อก 'Manager/หักลบการบันทึก' จะถูกผูกไปยังบิลต้นทาง (Consec Number) เป็นยอดติดลบใน receipts
+    - และบันทึกรายการใบผู้จัดการไว้ในตาราง manager_adjustments
+    """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    receipts, items, discounts = [], [], []
+    receipts, items, discounts, manager_adjustments = [], [], [], []
 
     pat_b_header = re.compile(
         r"^\s*(?P<date>\d{1,2}/\d{1,2}/\d{4})\s+(?P<time>\d{1,2}:\d{2}(?::\d{2})?)\s+(?P<inv>\d{3,})\s*$"
@@ -299,7 +311,6 @@ def parse_ej_text(text: str):
         inv_date_raw = inv_time_raw = inv_no = None
         block_items_total = 0.0
 
-        # manager flags
         is_manager = False
         consec_link = None
         mgr_qty = None
@@ -349,20 +360,28 @@ def parse_ej_text(text: str):
         inv_date = clean_date_token(inv_date_raw) if inv_date_raw else ""
         inv_time = clean_time_token(inv_time_raw) if inv_time_raw else ""
 
-        # ----- ถ้าเป็นใบผู้จัดการ: บันทึกเป็นยอดติดลบไปยังบิลที่ถูกผูก แล้วจบบล็อก -----
+        # ใบผู้จัดการ: ผูกยอดติดลบไปบิลต้นทาง + เก็บบันทึกลงตารางพิเศษ
         if is_manager and consec_link and mgr_amt:
             amt = extract_number_from_text(mgr_amt)
             if amt != 0:
                 receipts.append({
                     "amount": -abs(amt),
-                    "date": inv_date,          # ใช้วันที่/เวลาของใบผู้จัดการ (ไม่มีของต้นฉบับในบล็อกนี้)
+                    "date": inv_date,
                     "time": inv_time,
-                    "invoice": consec_link,    # ผูกไปยังบิลต้นทาง
+                    "invoice": consec_link,
                 })
-            # ไม่ parse รายการสินค้าภายในใบผู้จัดการ
+                manager_adjustments.append({
+                    "ManagerInvoice": (inv_no or "").zfill(6) if inv_no else "",
+                    "Date": inv_date,
+                    "Time": inv_time,
+                    "LinkedInvoice": consec_link,
+                    "Count": mgr_qty if mgr_qty is not None else "",
+                    "Amount": abs(amt),
+                    "AppliedToInvoiceAmount": -abs(amt),
+                })
             continue
 
-        # ---------- parse body (บิลปกติ) ----------
+        # ---------- บิลปกติ ----------
         i = 0
         while i < len(body_lines):
             text_line = body_lines[i]
@@ -476,7 +495,12 @@ def parse_ej_text(text: str):
                 "invoice": inv_no,
             })
 
-    return pd.DataFrame(receipts), pd.DataFrame(items), pd.DataFrame(discounts)
+    return (
+        pd.DataFrame(receipts),
+        pd.DataFrame(items),
+        pd.DataFrame(discounts),
+        pd.DataFrame(manager_adjustments)
+    )
 
 def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
     if df_items.empty:
@@ -488,17 +512,20 @@ def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["จำนวนชิ้น","ยอดเงิน"], ascending=[False, False])
     )
 
+# ==================== HEADER ====================
 st.markdown("<h2 style='text-align:center'>Casio V-R100 Tools</h2>", unsafe_allow_html=True)
 
+# ==================== SIDEBAR ====================
 with st.sidebar:
     st.markdown("### ⚙️ การตั้งค่า")
     vr100_encoding = st.selectbox("Encoding ไฟล์ SQL", ["UTF-8 (ปกติ)", "UTF-8 with BOM (UTF-8-SIG)"], index=1)
     st.caption("อัตโนมัติ: จับชีท + หัวตาราง + คอลัมน์เอง • ใช้เฉพาะ 'ราคาขาย' + โปรคงที่")
     st.caption("โปร: 3ชิ้น100→50฿, 4ชิ้น100→35฿, 50/2ชิ้น100→80฿ (ต่อชิ้น)")
 
+# ==================== TABS ====================
 tab_product, tab_sales = st.tabs(["🏷️ สินค้า (CIA001)", "📊 ยอดขาย (EJ)"])
 
-# ----- TAB PRODUCT (เหมือนเดิม) -----
+# ==================== TAB 1: PRODUCT (เดิม) ====================
 with tab_product:
     st.markdown("### อัปโหลด Excel/CSV หลายรายการ")
     st.caption("อัตโนมัติ: จับชีท + หัวตาราง + คอลัมน์เอง • ใช้เฉพาะ 'ราคาขาย' + โปรคงที่")
@@ -565,27 +592,29 @@ with tab_product:
             st.code(st.session_state.single_item_sql, language="sql")
         st.download_button("⬇️ ดาวน์โหลด SQL (รายการเดียว)", export_to_bytes(st.session_state.single_item_sql, vr100_encoding), file_name="CIA001_single_item.sql", mime="text/plain", use_container_width=True)
 
-# ----- TAB SALES (EJ) -----
+# ==================== TAB 2: SALES (EJ) ====================
 with tab_sales:
     st.markdown("### วิเคราะห์ยอดขายจากไฟล์ EJ")
     st.caption("อัปโหลด log_YYYYMMDD.txt จากเครื่อง V-R100 (อัปได้หลายไฟล์) — สรุปยอดขายตามบิลและตามสินค้า")
 
     ej_files = st.file_uploader("เลือกไฟล์ EJ (*.txt)", type=["txt"], accept_multiple_files=True, key="upload_ej_logs")
     if ej_files:
-        all_receipts, all_items, all_discounts = [], [], []
+        all_receipts, all_items, all_discounts, all_mgr = [], [], [], []
         with st.spinner("🔄 กำลังประมวลผลไฟล์..."):
             for file in ej_files:
                 text = read_text_with_encoding(file.read())
-                receipts, items, disc = parse_ej_text(text)
+                receipts, items, disc, mgr = parse_ej_text(text)
                 if not receipts.empty: all_receipts.append(receipts)
                 if not items.empty:    all_items.append(items)
                 if not disc.empty:     all_discounts.append(disc)
+                if not mgr.empty:      all_mgr.append(mgr)
 
         df_receipts_raw = pd.concat(all_receipts, ignore_index=True) if all_receipts else pd.DataFrame(columns=["amount","date","time","invoice"]).astype({"amount":"float"})
-        df_items    = pd.concat(all_items,    ignore_index=True) if all_items    else pd.DataFrame(columns=["name","qty","amount","date","time","invoice"])
-        df_discounts= pd.concat(all_discounts,ignore_index=True) if all_discounts else pd.DataFrame(columns=["discount","amount","times","date","time","invoice"])
+        df_items        = pd.concat(all_items,    ignore_index=True) if all_items    else pd.DataFrame(columns=["name","qty","amount","date","time","invoice"])
+        df_discounts    = pd.concat(all_discounts,ignore_index=True) if all_discounts else pd.DataFrame(columns=["discount","amount","times","date","time","invoice"])
+        df_mgr_adj      = pd.concat(all_mgr,      ignore_index=True) if all_mgr      else pd.DataFrame(columns=["ManagerInvoice","Date","Time","LinkedInvoice","Count","Amount","AppliedToInvoiceAmount"])
 
-        # ✅ ยุบยอดใบเสร็จตามเลขบิล เพื่อให้ใบผู้จัดการ (ติดลบ) หักกับบิลต้นฉบับ
+        # ยุบใบเสร็จตาม invoice (ใบผู้จัดการถูกหักกับต้นทางแล้ว)
         df_receipts = (
             df_receipts_raw
             .groupby("invoice", as_index=False)
@@ -595,8 +624,8 @@ with tab_sales:
         )
 
         total_receipts = (df_receipts["invoice"].nunique() if not df_receipts.empty else 0)
-        total_amount = float(df_receipts["amount"].sum()) if total_receipts else float(df_items["amount"].sum() if not df_items.empty else 0.0)
-        total_qty = int(df_items["qty"].sum()) if not df_items.empty else 0
+        total_amount   = float(df_receipts["amount"].sum()) if total_receipts else float(df_items["amount"].sum() if not df_items.empty else 0.0)
+        total_qty      = int(df_items["qty"].sum()) if not df_items.empty else 0
 
         c1, c2, c3 = st.columns(3)
         c1.metric("จำนวนบิล (สำเร็จ)", f"{total_receipts:,}")
@@ -625,7 +654,6 @@ with tab_sales:
             st.dataframe(df_receipts_display, use_container_width=True, hide_index=True)
 
         # รายละเอียดตามบิลสำหรับ Export
-        # (1) รวมรายการสินค้าเป็นข้อความ/ยอดสุทธิ
         if not df_items.empty:
             items_by_inv = (
                 df_items
@@ -643,7 +671,6 @@ with tab_sales:
         else:
             items_by_inv = pd.DataFrame(columns=["invoice","items_qty","items_amount","สินค้า"])
 
-        # (2) รวมส่วนลดต่อบิล
         if not df_discounts.empty:
             disc_by_inv = (
                 df_discounts
@@ -706,23 +733,41 @@ with tab_sales:
         else:
             bills_discounts = pd.DataFrame(columns=["Invoice","Date","Time","DiscountName","Times","Amount"])
 
+        # ✅ ชีทใหม่: Manager Adjustments
+        mgr_sheet = (
+            df_mgr_adj.assign(
+                ManagerInvoice=lambda d: d["ManagerInvoice"].astype(str).str.zfill(6),
+                LinkedInvoice=lambda d: d["LinkedInvoice"].astype(str).str.zfill(6),
+            )
+            if not df_mgr_adj.empty else
+            pd.DataFrame(columns=["ManagerInvoice","Date","Time","LinkedInvoice","Count","Amount","AppliedToInvoiceAmount"])
+        )
+
+        # ปุ่มดาวน์โหลด Excel (เพิ่มชีท Manager Adjustments)
         st.markdown("#### ⬇️ ดาวน์โหลด Excel — รายละเอียดตามบิล (ทั้งวัน)")
-        excel_bytes = export_excel_bills_bytes(bills_summary, bills_items, bills_discounts)
+        excel_bytes = export_excel_bills_bytes(bills_summary, bills_items, bills_discounts, mgr_sheet)
         st.download_button(
-            "📥 Export Excel — Bills / Bill Items / Bill Discounts",
+            "📥 Export Excel — Bills / Bill Items / Bill Discounts / Manager Adjustments",
             excel_bytes,
             file_name="EJ_bills_detail.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
 
+        # แสดงตัวอย่างใบผู้จัดการในแอป
+        if not mgr_sheet.empty:
+            with st.expander("🛠️ ใบผู้จัดการ (Manager Adjustments) — ตัวอย่าง", expanded=False):
+                st.dataframe(mgr_sheet.head(30), use_container_width=True, hide_index=True)
+
         with st.expander("👀 ตัวอย่างชีท Bills (Top 20)", expanded=False):
             st.dataframe(bills_summary.head(20), use_container_width=True, hide_index=True)
 
+        # ---------- สรุปตามสินค้า ----------
         st.markdown("#### 📦 สรุปยอดตามสินค้า")
         df_summary = summarize_items(df_items)
         st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
+        # ---------- ส่วนลดรวม ----------
         st.markdown("#### 🧾 ส่วนลด/คูปองที่ใช้")
         if df_discounts.empty:
             st.info("ไม่มีการใช้ส่วนลดในไฟล์ที่อัปโหลด")
@@ -734,11 +779,13 @@ with tab_sales:
             )
             st.dataframe(df_discount_summary, use_container_width=True, hide_index=True)
 
+        # ---------- Export สรุปตามสินค้า ----------
         c1, c2 = st.columns(2)
         with c1:
             st.download_button("⬇️ Export CSV — สรุปตามสินค้า", export_csv_to_bytes(df_summary), file_name="EJ_items_summary.csv", mime="text/csv", use_container_width=True)
         with c2:
             st.download_button("⬇️ Export Excel — สรุปตามสินค้า", export_excel_to_bytes(df_summary), file_name="EJ_items_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
+# ==================== FOOTER ====================
 st.markdown("---")
 st.caption("💾 อย่าลืม Restart App หลังนำเข้า SQL • โปร: 3ชิ้น100→50฿, 4ชิ้น100→35฿, 50/2ชิ้น100→80฿ • ITEMPARMCODE=000001 • TAXCODE_1=01")
