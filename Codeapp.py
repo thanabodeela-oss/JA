@@ -286,6 +286,7 @@ def _is_plausible_price(raw: str) -> bool:
     v = abs(extract_number_from_text(raw))
     return (v >= 5) or ("." in raw) or ("(" in raw and ")" in raw)
 
+# ========= PATCHED: parse_ej_text (แก้การตรวจจับบิลผู้จัดการ) =========
 def parse_ej_text(text: str):
     """Parse EJ -> (receipts_df, items_df, discounts_df, manager_df)
        - ใส่บิลผู้จัดการเป็นรายการติดลบให้บิลต้นทาง
@@ -297,9 +298,11 @@ def parse_ej_text(text: str):
     pat_b_header = re.compile(
         r"^\s*(?P<date>\d{1,2}/\d{1,2}/\d{4})\s+(?P<time>\d{1,2}:\d{2}(?::\d{2})?)\s+(?P<inv>\d{3,})\s*$"
     )
-    re_consec   = re.compile(r"^Consec\s+Number\s+(?P<no>\d+)")
-    re_sum_qty  = re.compile(r"ยอดขายรวม\s+จำนวน\s+(?P<qty>\d+)")
-    re_sum_amt  = re.compile(r"ยอดขายรวม\s+รวมเงิน\s+(?P<amt>[\d\.,\(\)]+)")
+    # ยืดหยุ่นขึ้น: Consec Number / Consec No: / Consec-No 123
+    re_consec   = re.compile(r"Consec\s*(?:Number|No\.?)\s*[:\-]?\s*(?P<no>\d+)", re.I)
+    re_sum_qty  = re.compile(r"ยอดขายรวม\s*จำนวน\s*(?P<qty>\d+)")
+    re_sum_amt  = re.compile(r"ยอดขายรวม\s*รวมเงิน\s*(?P<amt>[\d\.,\(\)\-]+)")
+    re_manager  = re.compile(r"\bmanager\b", re.I)
 
     blocks = re.split(r"\n(?=S\n)", "\n" + text)
     for block in blocks:
@@ -316,6 +319,7 @@ def parse_ej_text(text: str):
         mgr_qty = None
         mgr_amt_text = None
 
+        # --- scan header/body
         for raw_line in block.splitlines():
             if raw_line.startswith("HINVOICEDATE="):
                 inv_date_raw = raw_line.split("=", 1)[1].strip()
@@ -329,9 +333,9 @@ def parse_ej_text(text: str):
                 price_total = raw_line.split("=", 1)[1].strip()
             elif raw_line.startswith("B"):
                 text_line = raw_line[1:].strip()
-                if text_line.startswith("Manager"):
+                if re_manager.search(text_line):
                     is_manager = True
-                mcs = re_consec.match(text_line)
+                mcs = re_consec.search(text_line)
                 if mcs:
                     consec_link = mcs.group("no").zfill(6)
                 mqty = re_sum_qty.search(text_line)
@@ -352,19 +356,15 @@ def parse_ej_text(text: str):
                     canceled = True
                 body_lines.append(text_line)
 
-        if mode not in (None, "REG", "REG "):
-            continue
-        if canceled:
-            continue
-
         inv_date = clean_date_token(inv_date_raw) if inv_date_raw else ""
         inv_time = clean_time_token(inv_time_raw) if inv_time_raw else ""
 
-        # ----- Manager slip -> push negative to linked invoice + record row for report
+        # ---- Manager slip: จัดการก่อนและไม่สน HMODE/VOID
         if is_manager and consec_link and mgr_amt_text:
-            amt = extract_number_from_text(mgr_amt_text)
+            amt = extract_number_from_text(
+                "-" + mgr_amt_text[1:-1] if mgr_amt_text.startswith("(") and mgr_amt_text.endswith(")") else mgr_amt_text
+            )
             if amt != 0:
-                # สำหรับรายงานผู้จัดการ
                 managers.append({
                     "ManagerInvoice": str(inv_no).zfill(6) if inv_no else "",
                     "Date": inv_date,
@@ -372,23 +372,29 @@ def parse_ej_text(text: str):
                     "LinkedInvoice": str(consec_link).zfill(6),
                     "Count": mgr_qty if mgr_qty is not None else 0,
                     "Amount": amt,
-                    "ToInvoiceAmount": amt  # จำนวนเงินที่จะไปหักลบให้บิลต้นทาง
+                    "ToInvoiceAmount": amt
                 })
-                # สำหรับยอดขาย: หักลบให้บิลต้นทาง
+                # หักลบให้บิลต้นทาง
                 receipts.append({
                     "amount": -abs(amt),
                     "date": inv_date,
                     "time": inv_time,
                     "invoice": consec_link,
                 })
-            continue  # ไม่ parse รายการสินค้าในบิลผู้จัดการ
+            # ไม่ต้อง parse รายการสินค้าในบิลผู้จัดการ
+            continue
+
+        # ---- ข้ามบิลอื่นๆ ที่ไม่ใช่ขายปกติ
+        if mode not in (None, "REG", "REG "):
+            continue
+        if canceled:
+            continue
 
         # ---------- parse normal receipt body ----------
         i = 0
         while i < len(body_lines):
             text_line = body_lines[i]
 
-            # ส่วนลด
             if any(k in text_line for k in DISCOUNT_KEYWORDS):
                 m2 = PAT_DISCOUNT.match(text_line)
                 if m2:
@@ -409,13 +415,11 @@ def parse_ej_text(text: str):
                 i += 1
                 continue
 
-            # ข้ามบรรทัดสรุป/การชำระ
             if any(k in text_line for k in NON_ITEM_KEYWORDS):
                 i += 1
                 continue
 
             handled = False
-            # 2 บรรทัด (จำนวน+ชื่อ) + (ราคา)
             m_head = PAT_QTY_NAME_ONLY.match(text_line)
             if m_head and (i + 1) < len(body_lines):
                 next_line = body_lines[i + 1]
@@ -446,13 +450,10 @@ def parse_ej_text(text: str):
             if handled:
                 continue
 
-            # 1 บรรทัด
             m = PAT_LINE_ITEM.match(text_line)
             if m:
                 item_name = m.group("name").strip()
                 amount_text = m.group("amt").strip()
-
-                # กันเคสราคาอยู่บรรทัดถัดไป
                 if not _is_plausible_price(amount_text) and (i + 1) < len(body_lines):
                     next_line = body_lines[i + 1]
                     if not any(k in next_line for k in NON_ITEM_KEYWORDS):
@@ -492,7 +493,6 @@ def parse_ej_text(text: str):
 
             i += 1
 
-        # รวมยอดบิล (ใช้ HPRICE ถ้ามี)
         amount_final = extract_number_from_text(price_total) if (price_total and price_total.strip()) else block_items_total
         if amount_final != 0 or inv_no or inv_date or inv_time:
             receipts.append({
@@ -503,6 +503,7 @@ def parse_ej_text(text: str):
             })
 
     return pd.DataFrame(receipts), pd.DataFrame(items), pd.DataFrame(discounts), pd.DataFrame(managers)
+# ========= END PATCH =========
 
 def summarize_items(df_items: pd.DataFrame) -> pd.DataFrame:
     if df_items.empty:
