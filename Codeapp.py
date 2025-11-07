@@ -648,20 +648,34 @@ with tab_sales:
         # ---------- รายละเอียดตามบิลสำหรับ Export ----------
         # (1) สินค้าต่อ (วันที่+บิล)
         if not df_items.empty:
-            items_by_inv = (
-                df_items
-                .groupby(["invoice","date"], as_index=False)
-                .agg(Time=("time","min"),
-                     items_qty=("qty","sum"),
-                     items_amount=("amount","sum"))
-            )
-            name_agg = df_items.groupby(["invoice","date","name"])["qty"].sum().reset_index()
-            name_agg["txt"] = name_agg.apply(lambda r: f"{r['name']} x{int(r['qty'])}", axis=1)
-            items_name_list = name_agg.groupby(["invoice","date"])["txt"].apply(lambda s: ", ".join(s.tolist())).reset_index(name="สินค้า")
-            items_by_inv = items_by_inv.merge(items_name_list, on=["invoice","date"], how="left")
-        else:
-            items_by_inv = pd.DataFrame(columns=["invoice","date","Time","items_qty","items_amount","สินค้า"])
+    items_by_inv = (
+        df_items
+        .groupby(["invoice","date"], as_index=False)
+        .agg(Time=("time","min"),
+             items_qty=("qty","sum"),
+             items_amount=("amount","sum"))
+    )
 
+    # รวมจำนวนรายชื่อสินค้าแล้ว "กรองรายการที่จำนวนสุทธิ == 0"
+    name_agg = (
+        df_items.groupby(["invoice","date","name"])["qty"]
+        .sum()
+        .reset_index()
+    )
+    # บางที dtype จะเป็น float จากการรวม ให้ปัดเป็น int แล้วกรอง 0
+    name_agg["qty"] = name_agg["qty"].astype(int)
+    name_agg = name_agg[name_agg["qty"] != 0]
+
+    name_agg["txt"] = name_agg.apply(lambda r: f"{r['name']} x{int(r['qty'])}", axis=1)
+    items_name_list = (
+        name_agg.groupby(["invoice","date"])["txt"]
+        .apply(lambda s: ", ".join(s.tolist()))
+        .reset_index(name="สินค้า")
+    )
+
+    items_by_inv = items_by_inv.merge(items_name_list, on=["invoice","date"], how="left")
+else:
+    items_by_inv = pd.DataFrame(columns=["invoice","date","Time","items_qty","items_amount","สินค้า"])
         # (2) ส่วนลดต่อ (วันที่+บิล)
         if not df_discounts.empty:
             disc_by_inv = (
