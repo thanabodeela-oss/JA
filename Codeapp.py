@@ -208,38 +208,6 @@ def normalize_uploaded_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     out = out[~((out["ITEMCODE"] == "") & (out["ITEMNAME"] == ""))].reset_index(drop=True)
     return out
 
-# ==================== SQL GENERATION ====================
-def generate_row_sql_cia001(row: pd.Series, timestamp: str) -> str:
-    raw_code = normalize_string(row.get("ITEMCODE", ""))
-    itemcode = raw_code.zfill(12) if raw_code else ""
-    scancode1 = normalize_string(row.get("SCANCODE1", ""))
-    itemname = normalize_string(row.get("ITEMNAME", ""))
-
-    dept      = "bewild"
-    parm      = normalize_string(row.get("ITEMPARMCODE", "000001"))
-    taxcode_1 = normalize_string(row.get("TAXCODE_1", "01"))
-
-    unitweight = to_int_safe(row.get("UNITWEIGHT", 0), 0)
-    unitqty    = to_int_safe(row.get("UNITQTY",   1), 1)
-    unitprice  = to_int_safe(row.get("UNITPRICE", 0), 0)
-
-    delete_sql = f"DELETE FROM CIA001 WHERE ITEMCODE='{sql_escape_string(itemcode)}';"
-    insert_sql = (
-        "INSERT INTO CIA001 (ITEMCODE, SCANCODE1, ITEMNAME, ITEMDEPTCODE, ITEMPARMCODE, "
-        "UNITWEIGHT, UNITQTY, UNITPRICE, TAXCODE_1, CREATEDATETIME, UPDATEDATETIME) VALUES "
-        f"('{sql_escape_string(itemcode)}','{sql_escape_string(scancode1)}','{sql_escape_string(itemname)}','{dept}','{sql_escape_string(parm)}',"
-        f"{unitweight},{unitqty},{unitprice},'{sql_escape_string(taxcode_1)}','{timestamp}','{timestamp}');"
-    )
-    return delete_sql + "\n" + insert_sql
-
-def build_sql_cia001(df: pd.DataFrame) -> str:
-    timestamp = get_casio_timestamp()
-    lines = ["BEGIN TRANSACTION;"]
-    for _, row in df.iterrows():
-        lines.append(generate_row_sql_cia001(row, timestamp))
-    lines.append("COMMIT;")
-    return "\n".join(lines)
-
 # ==================== EJ PARSING ====================
 def read_text_with_encoding(data: bytes) -> str:
     for encoding in EJ_ENCODINGS:
@@ -260,7 +228,7 @@ def extract_number_from_text(text: str) -> float:
 def clean_time_token(tok: str | None) -> str:
     if not tok: return ""
     s = re.sub(r"\D", "", str(tok).strip())
-    if len(s) == 3:  # เช่น 945 -> 09:45
+    if len(s) == 3:
         return f"0{s[0]}:{s[1:]}"
     if len(s) == 4:
         return f"{s[:2]}:{s[2:]}"
@@ -289,9 +257,9 @@ def _is_plausible_price(raw: str) -> bool:
     return (v >= 5) or ("." in raw) or ("(" in raw and ")" in raw)
 
 def parse_ej_text(text: str):
-    """Parse EJ -> (receipts_df, items_df, discounts_df, manager_df)
+    """Parse EJ -> (receipts_df, items_df, discounts_df, manager_df).
        - รองรับบิลผู้จัดการ
-       - ใช้ยอดสุทธิจาก HPRICE / คำว่า 'รวมเงินทั้งหมด|ยอดสุทธิ|สุทธิ'
+       - เลือกยอดสุทธิจาก HPRICE / คำว่า 'รวมเงินทั้งหมด|ยอดสุทธิ|สุทธิ'
     """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     receipts, items, discounts, managers = [], [], [], []
@@ -554,7 +522,7 @@ with tab_product:
 
             df_normalized = normalize_uploaded_dataframe(df_raw)
 
-        st.success(f"✅ นำเข้าสำเร็จ {len(df_normalized):,} รายการ • ใช้ชีท: {chosen_sheet} • แถวหัวตาราง: {header_row}")
+        st.success(f"✅ นำเข้าสำเร็จ {len[df_normalized):,} รายการ • ใช้ชีท: {chosen_sheet} • แถวหัวตาราง: {header_row}")
         with st.expander("👀 ดูข้อมูลที่นำเข้า (30 รายการแรก)", expanded=True):
             st.dataframe(df_normalized.head(30), use_container_width=True, hide_index=True)
 
@@ -687,9 +655,7 @@ with tab_sales:
                      items_qty=("qty","sum"),
                      items_amount=("amount","sum"))
             )
-            name_agg = (
-                df_items.groupby(["invoice","date","name"])["qty"].sum().reset_index()
-            )
+            name_agg = df_items.groupby(["invoice","date","name"])["qty"].sum().reset_index()
             name_agg["txt"] = name_agg.apply(lambda r: f"{r['name']} x{int(r['qty'])}", axis=1)
             items_name_list = name_agg.groupby(["invoice","date"])["txt"].apply(lambda s: ", ".join(s.tolist())).reset_index(name="สินค้า")
             items_by_inv = items_by_inv.merge(items_name_list, on=["invoice","date"], how="left")
@@ -712,7 +678,7 @@ with tab_sales:
         else:
             disc_by_inv = pd.DataFrame(columns=["invoice","date","Time_d","discount_times","discount_amount","ส่วนลด"])
 
-        # (3) รวมฐานด้วย (วันที่+บิล)
+        # (3) รวมฐานด้วย (วันที่+บิล) — เปลี่ยนชื่อจาก receipts เป็น Date_r/Time_r กันชนกัน
         base_keys = (
             pd.concat([
                 df_receipts[["invoice","date"]],
@@ -721,30 +687,41 @@ with tab_sales:
             ], ignore_index=True).drop_duplicates()
         )
 
+        receipts_for_merge = df_receipts.rename(columns={"invoice":"Invoice","date":"Date_r","time":"Time_r"})
         base = (
             base_keys
-            .merge(df_receipts.rename(columns={"invoice":"Invoice","date":"Date","time":"Time"}), left_on=["invoice","date"], right_on=["Invoice","Date"], how="left")
+            .merge(receipts_for_merge, left_on=["invoice","date"], right_on=["Invoice","Date_r"], how="left")
             .merge(items_by_inv, on=["invoice","date"], how="left")
             .merge(disc_by_inv, on=["invoice","date"], how="left")
         )
 
         # เวลา: เลือกดีที่สุดจาก items > receipts > discounts
         def _pick_time(r):
-            for k in ("Time", "Time_x", "Time_d"):
+            for k in ("Time", "Time_r", "Time_d"):
                 v = r.get(k, "")
                 if pd.notna(v) and str(v).strip() != "":
                     return v
             return ""
 
         base["TimeFinal"] = base.apply(_pick_time, axis=1)
-        base = base.fillna({"สินค้า":"", "ส่วนลด":"", "items_qty":0, "items_amount":0.0, "discount_times":0, "discount_amount":0.0, "amount":0.0})
-        base["Invoice"] = base["invoice"].astype(str)
+
+        # ทำความสะอาดคอลัมน์ซ้ำ
+        base = base.fillna({
+            "สินค้า":"", "ส่วนลด":"", "items_qty":0, "items_amount":0.0,
+            "discount_times":0, "discount_amount":0.0, "amount":0.0
+        })
+        base["Invoice"] = base["Invoice"].fillna(base["invoice"].astype(str))
+        base = base.rename(columns={"date":"Date"})
+        # ลบทิ้งคอลัมน์ชั่วคราวกันชื่อซ้ำ
+        drop_cols = [c for c in ["Date_r","Time_r","Time","Time_d","invoice"] if c in base.columns]
+        tmp = base.drop(columns=drop_cols, errors="ignore")
 
         bills_summary = (
-            base.assign(Invoice=lambda d: d["Invoice"].str.zfill(6))
-                .rename(columns={"date":"Date","TimeFinal":"Time","amount":"ยอดเงิน"})
-                [["Invoice","Date","Time","สินค้า","ส่วนลด","ยอดเงิน"]]
-                .sort_values(["Date","Time","Invoice"])
+            tmp.assign(Invoice=lambda d: d["Invoice"].astype(str).str.zfill(6),
+                       Time=lambda d: d["TimeFinal"])
+               .rename(columns={"amount":"ยอดเงิน"})
+               [["Invoice","Date","Time","สินค้า","ส่วนลด","ยอดเงิน"]]
+               .sort_values(["Date","Time","Invoice"])
         )
 
         # (4) Bill Items
