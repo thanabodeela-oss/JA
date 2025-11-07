@@ -228,7 +228,7 @@ def extract_number_from_text(text: str) -> float:
 def clean_time_token(tok: str | None) -> str:
     if not tok: return ""
     s = re.sub(r"\D", "", str(tok).strip())
-    if len(s) == 3:
+    if len(s) == 3:   # eg 907 -> 09:07
         return f"0{s[0]}:{s[1:]}"
     if len(s) == 4:
         return f"{s[:2]}:{s[2:]}"
@@ -257,9 +257,9 @@ def _is_plausible_price(raw: str) -> bool:
     return (v >= 5) or ("." in raw) or ("(" in raw and ")" in raw)
 
 def parse_ej_text(text: str):
-    """Parse EJ -> (receipts_df, items_df, discounts_df, manager_df).
-       - รองรับบิลผู้จัดการ
-       - เลือกยอดสุทธิจาก HPRICE / คำว่า 'รวมเงินทั้งหมด|ยอดสุทธิ|สุทธิ'
+    """Parse EJ -> (receipts_df, items_df, discounts_df, manager_df)
+       - รองรับบิลผู้จัดการ (Manager) และผูกกับ Consec Number
+       - เลือกยอดสุทธิจาก HPRICE หรือบรรทัด 'รวมเงินทั้งหมด/ยอดสุทธิ/สุทธิ'
     """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     receipts, items, discounts, managers = [], [], [], []
@@ -587,7 +587,7 @@ with tab_sales:
         df_discounts    = pd.concat(all_discounts,ignore_index=True) if all_discounts else pd.DataFrame(columns=["discount","amount","times","date","time","invoice"])
         df_manager      = pd.concat(all_mgr,      ignore_index=True) if all_mgr      else pd.DataFrame(columns=["ManagerInvoice","Date","Time","LinkedInvoice","Count","Amount","ToInvoiceAmount"])
 
-        # ---------- map date per invoice (กันเลขบิลซ้ำข้ามวัน) ----------
+        # ---------- date mapping per invoice (กันเลขบิลซ้ำข้ามวัน) ----------
         date_from_items = df_items.groupby("invoice")["date"].min() if not df_items.empty else pd.Series(dtype="object")
         date_from_disc  = df_discounts.groupby("invoice")["date"].min() if not df_discounts.empty else pd.Series(dtype="object")
         date_from_sale  = df_receipts_raw[df_receipts_raw.get("src","sale")=="sale"].groupby("invoice")["date"].min() if not df_receipts_raw.empty else pd.Series(dtype="object")
@@ -646,36 +646,36 @@ with tab_sales:
             st.dataframe(df_receipts_display, use_container_width=True, hide_index=True)
 
         # ---------- รายละเอียดตามบิลสำหรับ Export ----------
-        # (1) สินค้าต่อ (วันที่+บิล)
+        # (1) สินค้าต่อ (วันที่+บิล) — ตัด x0 ออก
         if not df_items.empty:
-    items_by_inv = (
-        df_items
-        .groupby(["invoice","date"], as_index=False)
-        .agg(Time=("time","min"),
-             items_qty=("qty","sum"),
-             items_amount=("amount","sum"))
-    )
+            items_by_inv = (
+                df_items
+                .groupby(["invoice","date"], as_index=False)
+                .agg(Time=("time","min"),
+                     items_qty=("qty","sum"),
+                     items_amount=("amount","sum"))
+            )
 
-    # รวมจำนวนรายชื่อสินค้าแล้ว "กรองรายการที่จำนวนสุทธิ == 0"
-    name_agg = (
-        df_items.groupby(["invoice","date","name"])["qty"]
-        .sum()
-        .reset_index()
-    )
-    # บางที dtype จะเป็น float จากการรวม ให้ปัดเป็น int แล้วกรอง 0
-    name_agg["qty"] = name_agg["qty"].astype(int)
-    name_agg = name_agg[name_agg["qty"] != 0]
+            name_agg = (
+                df_items.groupby(["invoice","date","name"])["qty"]
+                .sum()
+                .reset_index()
+            )
+            # ให้เป็น int แล้วกรองที่รวมแล้ว = 0
+            name_agg["qty"] = name_agg["qty"].astype(int)
+            name_agg = name_agg[name_agg["qty"] != 0]
 
-    name_agg["txt"] = name_agg.apply(lambda r: f"{r['name']} x{int(r['qty'])}", axis=1)
-    items_name_list = (
-        name_agg.groupby(["invoice","date"])["txt"]
-        .apply(lambda s: ", ".join(s.tolist()))
-        .reset_index(name="สินค้า")
-    )
+            name_agg["txt"] = name_agg.apply(lambda r: f"{r['name']} x{int(r['qty'])}", axis=1)
+            items_name_list = (
+                name_agg.groupby(["invoice","date"])["txt"]
+                .apply(lambda s: ", ".join(s.tolist()))
+                .reset_index(name="สินค้า")
+            )
 
-    items_by_inv = items_by_inv.merge(items_name_list, on=["invoice","date"], how="left")
-else:
-    items_by_inv = pd.DataFrame(columns=["invoice","date","Time","items_qty","items_amount","สินค้า"])
+            items_by_inv = items_by_inv.merge(items_name_list, on=["invoice","date"], how="left")
+        else:
+            items_by_inv = pd.DataFrame(columns=["invoice","date","Time","items_qty","items_amount","สินค้า"])
+
         # (2) ส่วนลดต่อ (วันที่+บิล)
         if not df_discounts.empty:
             disc_by_inv = (
@@ -719,14 +719,12 @@ else:
 
         base["TimeFinal"] = base.apply(_pick_time, axis=1)
 
-        # ทำความสะอาดคอลัมน์ซ้ำ
         base = base.fillna({
             "สินค้า":"", "ส่วนลด":"", "items_qty":0, "items_amount":0.0,
             "discount_times":0, "discount_amount":0.0, "amount":0.0
         })
         base["Invoice"] = base["Invoice"].fillna(base["invoice"].astype(str))
         base = base.rename(columns={"date":"Date"})
-        # ลบทิ้งคอลัมน์ชั่วคราวกันชื่อซ้ำ
         drop_cols = [c for c in ["Date_r","Time_r","Time","Time_d","invoice"] if c in base.columns]
         tmp = base.drop(columns=drop_cols, errors="ignore")
 
