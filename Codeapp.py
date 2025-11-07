@@ -522,7 +522,7 @@ with tab_product:
 
             df_normalized = normalize_uploaded_dataframe(df_raw)
 
-        st.success(f"✅ นำเข้าสำเร็จ {len[df_normalized):,} รายการ • ใช้ชีท: {chosen_sheet} • แถวหัวตาราง: {header_row}")
+        st.success(f"✅ นำเข้าสำเร็จ {len(df_normalized):,} รายการ • ใช้ชีท: {chosen_sheet} • แถวหัวตาราง: {header_row}")
         with st.expander("👀 ดูข้อมูลที่นำเข้า (30 รายการแรก)", expanded=True):
             st.dataframe(df_normalized.head(30), use_container_width=True, hide_index=True)
 
